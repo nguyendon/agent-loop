@@ -20,9 +20,16 @@ class AgentError(RuntimeError):
 
 
 class Agent(ABC):
-    """Anything the orchestrator can ask to take a turn."""
+    """Anything the orchestrator can ask to take a turn.
+
+    ``session_id`` and ``turns`` are the resumable-session contract: the
+    orchestrator reads them and the store persists them, so a restored agent can
+    pick its real history back up. Stateless agents just leave them at default.
+    """
 
     name: str
+    session_id: str | None = None
+    turns: int = 0
 
     @abstractmethod
     def send(self, prompt: str) -> TurnResult:
