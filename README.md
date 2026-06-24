@@ -147,14 +147,14 @@ Install the CLI once, then point it anywhere — both agents run in the target
 directory, so they work on whatever repo you aim them at.
 
 ```bash
-uv tool install /path/to/pr-review-agent-loop   # puts `agentloop` on your PATH
+uv tool install /path/to/agent-loop   # puts `agentloop` on your PATH
 
 cd /path/to/other/repo && agentloop "review the changes"   # cd in...
 agentloop "review the changes" --repo /path/to/other/repo  # ...or pass --repo
 ```
 
 Pick up later changes with `uv tool upgrade agentloop`. To run without installing:
-`uv run --project /path/to/pr-review-agent-loop agentloop "..." --repo /path/to/other/repo`.
+`uv run --project /path/to/agent-loop agentloop "..." --repo /path/to/other/repo`.
 
 ## As a library
 
