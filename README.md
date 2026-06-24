@@ -30,43 +30,45 @@ Requires the `claude` and `codex` CLIs installed and logged in.
 
 ## Use it
 
+The loop is task-agnostic. `run` hands the two agents a freeform prompt and they
+do the work with their own tools (git, file reads, `gh`, …). `review` is a thin
+preset over `run` with a reviewer prompt.
+
 ```bash
-# Two agents debate an open problem until they agree (or hit the round cap):
-uv run agentloop debate "Design a token-bucket rate limiter for our API"
+# Any task — the agents inspect the repo / fetch the PR / etc. themselves:
+uv run agentloop run "review the uncommitted changes and agree on the top issues"
+uv run agentloop run "review PR #42"
+uv run agentloop run "find and fix the flaky test in tests/"
 
-# Two agents review the current branch's diff and reconcile findings:
-uv run agentloop review --base main --head HEAD --budget 1.50
+# Pure reasoning, no repo access (cheaper, faster):
+uv run agentloop run "Design a token-bucket rate limiter" --no-tools
 
-# Same review, as a library script you can edit:
-uv run python examples/pr_review.py --base main --head HEAD
+# Review preset (defaults to the current working changes):
+uv run agentloop review
+uv run agentloop review "the last 3 commits" --budget 1.50
 
 # Persist a run, then resume it by reusing the same journal path:
-uv run agentloop debate "Design a cache eviction policy" --rounds 2 --journal run.jsonl
-uv run agentloop debate "Design a cache eviction policy" --rounds 6 --journal run.jsonl
+uv run agentloop run "review the changes" --rounds 2 --journal run.jsonl
+uv run agentloop run "review the changes" --rounds 6 --journal run.jsonl
 ```
+
+By default the agents have **read-only** tool access (claude in plan mode, codex
+in its read-only sandbox), so they ground findings in the real code and history.
+`--no-tools` drops claude to prompt-only for tasks that need no repo access — it's
+cheaper and faster but the agents only see what you put in the prompt.
 
 ## Run it on another repo
 
-Install the CLI once, then point it anywhere. `git` and both agents run in the
-target directory, so the loop reviews whatever repo you aim it at.
+Install the CLI once, then point it anywhere — both agents run in the target
+directory, so they review whatever repo you aim them at.
 
 ```bash
 uv tool install /path/to/pr-review-agent-loop   # puts `agentloop` on your PATH
 
-# either cd into the target repo...
-cd /path/to/other/repo && agentloop review --base main --head my-feature
-
-# ...or stay put and pass --repo:
-agentloop review --repo /path/to/other/repo --base main --head my-feature
-
-# let the agents read beyond the diff (related files, callers, git history):
-agentloop review --repo /path/to/other/repo --explore
+cd /path/to/other/repo && agentloop review                  # cd in...
+agentloop review --repo /path/to/other/repo                 # ...or pass --repo
+agentloop run "review PR #42" --repo /path/to/other/repo
 ```
-
-By default the agents only see the diff (inlined in the prompt). `--explore`
-gives them read-only access to the whole repo — claude runs in plan mode, codex
-in its read-only sandbox — so findings can be grounded in surrounding code and
-history. It costs more (extra tool calls and tokens) and takes longer per turn.
 
 Pick up later changes with `uv tool upgrade agentloop`. To run without installing:
 `uv run --project /path/to/pr-review-agent-loop agentloop review --repo /path/to/other/repo`.

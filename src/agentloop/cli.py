@@ -1,7 +1,13 @@
-"""Command-line entry point: run the loop without writing any Python.
+"""Command-line entry point.
 
-uv run agentloop debate "Design a rate limiter for our API"
-uv run agentloop review --base main --head HEAD
+The loop is task-agnostic: `run` hands the two agents a freeform prompt and lets
+them do the work with their own tools (git, file reads, gh, …). `review` is just
+a thin preset over `run` that supplies a reviewer prompt.
+
+    uv run agentloop run "review the uncommitted changes and agree on the top issues"
+    uv run agentloop run "design a token-bucket rate limiter" --no-tools
+    uv run agentloop review
+    uv run agentloop review "PR #42"
 """
 
 from __future__ import annotations
@@ -14,7 +20,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
-from . import git
 from .adapters.claude import ClaudeAgent
 from .adapters.codex import CodexAgent
 from .domain import Message
@@ -27,6 +32,20 @@ app = typer.Typer(add_completion=False, help="Run a multi-agent loop over the cl
 console = Console()
 
 _STYLES = {"claude": "bold magenta", "codex": "bold cyan", "user": "dim"}
+
+# What `review` reviews when you don't say. The agent inspects it with its tools.
+_DEFAULT_REVIEW_TARGET = (
+    "the current uncommitted and staged changes "
+    "(if the working tree is clean, review the most recent commit instead)"
+)
+_REVIEW_PROMPT = (
+    "You are reviewing code changes in this git repository. Review {target}. Use "
+    "your tools to inspect them (`git status`, `git diff HEAD`, `git show HEAD`, or "
+    "`gh pr diff <n>` for a pull request) and read related files to ground your "
+    "findings. Report correctness bugs, security issues, and risky changes; ignore "
+    "style nits. Give a concise, prioritized list citing file and line, then "
+    "converge on an agreed set of findings."
+)
 
 
 def _printer() -> Callable[[Message], None]:
@@ -46,25 +65,22 @@ def _check_repo(repo: str | None) -> None:
         raise typer.Exit(2)
 
 
-def _run(
+def _run_loop(
     task: str,
     *,
     rounds: int,
     budget: float | None,
-    marker: str,
     journal: str | None,
     repo: str | None,
-    explore: bool = False,
+    tools: bool,
 ) -> None:
-    # cwd is what makes the tool location-independent: git and both agent
-    # subprocesses run in the target repo instead of wherever you launched from.
-    # When exploring, claude runs in plan mode -- read-only tools allowed, edits
-    # blocked -- mirroring codex's read-only sandbox. Without it, claude in print
-    # mode can't read files and only sees what's in the prompt.
-    claude = ClaudeAgent("claude", cwd=repo, permission_mode="plan" if explore else None)
-    codex = CodexAgent("codex", sandbox="read-only", cwd=repo)
+    # cwd makes the tool location-independent: git and both agents run in the
+    # target repo. With tools, claude gets plan mode (read-only tools, no edits),
+    # mirroring codex's read-only sandbox; without, claude only sees the prompt.
+    claude = ClaudeAgent("claude", cwd=repo, permission_mode="plan" if tools else None)
+    codex = CodexAgent("codex", cwd=repo, sandbox="read-only")
 
-    stop: list[Consensus | BudgetUSD] = [Consensus(marker)]
+    stop: list[Consensus | BudgetUSD] = [Consensus("AGREED")]
     if budget:
         stop.append(BudgetUSD(budget))
 
@@ -72,10 +88,9 @@ def _run(
     if store and store.exists():
         console.print(f"[dim]resuming from {journal}[/dim]\n")
 
-    policy = DebatePolicy(task)
     loop = Orchestrator(
         [claude, codex],
-        policy,
+        DebatePolicy(task),
         stop=stop,
         max_rounds=rounds,
         on_message=_printer(),
@@ -95,70 +110,46 @@ def _run(
 
 
 @app.command()
-def debate(
-    task: str = typer.Argument(..., help="The problem the two agents should hash out."),
+def run(
+    task: str = typer.Argument(..., help="What you want the two agents to do."),
     rounds: int = typer.Option(8, help="Max agent turns before stopping."),
     budget: float | None = typer.Option(None, help="Stop once total cost (USD) exceeds this."),
-    marker: str = typer.Option("AGREED", help="Word that signals consensus."),
-    journal: str | None = typer.Option(
-        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
-    ),
     repo: str | None = typer.Option(
         None, help="Directory to run the agents in (defaults to the current directory)."
     ),
+    journal: str | None = typer.Option(
+        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
+    ),
+    no_tools: bool = typer.Option(
+        False, "--no-tools", help="Run claude without file/repo tools (pure reasoning)."
+    ),
 ) -> None:
-    """Have claude and codex debate an open-ended problem until they converge."""
+    """Run the two-agent loop on any task; the agents do the work themselves."""
     _check_repo(repo)
-    _run(task, rounds=rounds, budget=budget, marker=marker, journal=journal, repo=repo)
+    _run_loop(task, rounds=rounds, budget=budget, journal=journal, repo=repo, tools=not no_tools)
 
 
 @app.command()
 def review(
-    base: str = typer.Option("main", help="Base branch to diff against."),
-    head: str = typer.Option("HEAD", help="Branch/ref under review."),
+    target: str | None = typer.Argument(
+        None, help='What to review. Default: working changes. e.g. "PR #42", "the last 3 commits".'
+    ),
     rounds: int = typer.Option(6, help="Max agent turns before stopping."),
     budget: float | None = typer.Option(None, help="Stop once total cost (USD) exceeds this."),
-    journal: str | None = typer.Option(
-        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
-    ),
     repo: str | None = typer.Option(
         None, help="Git repo to review (defaults to the current directory)."
     ),
-    explore: bool = typer.Option(
-        False,
-        "--explore",
-        help="Let the agents read the wider repo (not just the diff) to ground findings.",
+    journal: str | None = typer.Option(
+        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
+    ),
+    no_tools: bool = typer.Option(
+        False, "--no-tools", help="Run claude without file/repo tools (pure reasoning)."
     ),
 ) -> None:
-    """Two agents review a branch's diff and reconcile their findings."""
+    """Two agents review code changes and reconcile findings (a preset over `run`)."""
     _check_repo(repo)
-    patch = git.diff(base, head, cwd=repo)
-    if not patch.strip():
-        console.print(f"[yellow]No diff between {base} and {head}.[/yellow]")
-        raise typer.Exit(1)
-
-    explore_note = (
-        " You have read-only access to the full repository: read related files, "
-        "check how the changed code is called elsewhere, and inspect history with "
-        "git log/blame to ground your findings. Do not modify anything."
-        if explore
-        else ""
-    )
-    task = (
-        "You are reviewing a pull request. Find correctness bugs, security issues, "
-        "and risky changes. Ignore style nits. Output a concise, prioritized list of "
-        f"findings; cite file and line.{explore_note} Here is the diff:\n\n"
-        f"```diff\n{patch}\n```"
-    )
-    _run(
-        task,
-        rounds=rounds,
-        budget=budget,
-        marker="AGREED",
-        journal=journal,
-        repo=repo,
-        explore=explore,
-    )
+    task = _REVIEW_PROMPT.format(target=target or _DEFAULT_REVIEW_TARGET)
+    _run_loop(task, rounds=rounds, budget=budget, journal=journal, repo=repo, tools=not no_tools)
 
 
 if __name__ == "__main__":
