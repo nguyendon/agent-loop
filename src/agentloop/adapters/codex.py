@@ -86,6 +86,7 @@ class CodexAgent(CliAgent):
     def _parse(self, stdout: str) -> TurnResult:
         session_id: str | None = None
         usage: dict[str, object] | None = None
+        cost_usd: float | None = None
         parts: list[str] = []
 
         for line in stdout.splitlines():
@@ -105,11 +106,13 @@ class CodexAgent(CliAgent):
                         parts.append(str(item["text"]))
                 case "turn.completed":
                     usage = event.get("usage")
+                    cost_usd = _cost_usd(event)
 
         return TurnResult(
             text="\n".join(parts).strip(),
             session_id=session_id,
             usage=usage,
+            cost_usd=cost_usd,
             raw=stdout,
         )
 
@@ -143,3 +146,16 @@ def _error_message(event: dict[str, object]) -> str:
         if isinstance(message, str):
             return message
     return raw
+
+
+def _cost_usd(event: dict[str, object]) -> float | None:
+    for candidate in (event.get("total_cost_usd"), event.get("cost_usd")):
+        if isinstance(candidate, int | float):
+            return float(candidate)
+    usage = event.get("usage")
+    if isinstance(usage, dict):
+        for key in ("total_cost_usd", "cost_usd"):
+            candidate = usage.get(key)
+            if isinstance(candidate, int | float):
+                return float(candidate)
+    return None
