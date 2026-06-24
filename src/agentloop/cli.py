@@ -20,6 +20,7 @@ from .domain import Message
 from .orchestrator import Orchestrator
 from .policy import DebatePolicy
 from .stop import BudgetUSD, Consensus
+from .store import JournalStore
 
 app = typer.Typer(add_completion=False, help="Run a multi-agent loop over the claude & codex CLIs.")
 console = Console()
@@ -38,13 +39,17 @@ def _printer() -> Callable[[Message], None]:
     return show
 
 
-def _run(task: str, *, rounds: int, budget: float | None, marker: str) -> None:
+def _run(task: str, *, rounds: int, budget: float | None, marker: str, journal: str | None) -> None:
     claude = ClaudeAgent("claude")
     codex = CodexAgent("codex", sandbox="read-only")
 
     stop: list[Consensus | BudgetUSD] = [Consensus(marker)]
     if budget:
         stop.append(BudgetUSD(budget))
+
+    store = JournalStore(journal) if journal else None
+    if store and store.exists():
+        console.print(f"[dim]resuming from {journal}[/dim]\n")
 
     policy = DebatePolicy(task)
     loop = Orchestrator(
@@ -53,14 +58,16 @@ def _run(task: str, *, rounds: int, budget: float | None, marker: str) -> None:
         stop=stop,
         max_rounds=rounds,
         on_message=_printer(),
+        store=store,
     )
     result = loop.run()
 
     console.print(
         Panel(
             f"stopped by: [bold]{result.stopped_by}[/bold]\n"
-            f"turns: {result.turns}\n"
-            f"total cost: ${result.transcript.total_cost_usd:.4f}",
+            f"turns: {result.turns}{' (resumed)' if result.resumed else ''}\n"
+            f"total cost: ${result.transcript.total_cost_usd:.4f}"
+            + (f"\njournal: {journal}" if journal else ""),
             title="done",
         )
     )
@@ -72,9 +79,12 @@ def debate(
     rounds: int = typer.Option(8, help="Max agent turns before stopping."),
     budget: float | None = typer.Option(None, help="Stop once total cost (USD) exceeds this."),
     marker: str = typer.Option("AGREED", help="Word that signals consensus."),
+    journal: str | None = typer.Option(
+        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
+    ),
 ) -> None:
     """Have claude and codex debate an open-ended problem until they converge."""
-    _run(task, rounds=rounds, budget=budget, marker=marker)
+    _run(task, rounds=rounds, budget=budget, marker=marker, journal=journal)
 
 
 @app.command()
@@ -83,6 +93,9 @@ def review(
     head: str = typer.Option("HEAD", help="Branch/ref under review."),
     rounds: int = typer.Option(6, help="Max agent turns before stopping."),
     budget: float | None = typer.Option(None, help="Stop once total cost (USD) exceeds this."),
+    journal: str | None = typer.Option(
+        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
+    ),
 ) -> None:
     """Two agents review a branch's diff and reconcile their findings."""
     patch = git.diff(base, head)
@@ -96,7 +109,7 @@ def review(
         "findings; cite file and line. Here is the diff:\n\n"
         f"```diff\n{patch}\n```"
     )
-    _run(task, rounds=rounds, budget=budget, marker="AGREED")
+    _run(task, rounds=rounds, budget=budget, marker="AGREED", journal=journal)
 
 
 if __name__ == "__main__":
