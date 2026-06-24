@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -25,6 +26,7 @@ from rich.status import Status
 from .agent import Agent
 from .domain import Message
 from .pipeline import Build, solve
+from .report import write_run_report
 from .stop import BudgetUSD, Consensus, StopCondition
 from .store import JournalStore
 
@@ -69,11 +71,16 @@ def _run_loop(
     tools: bool,
     num_agents: int,
     triage: bool,
+    out_dir: str | None,
     verbose: int,
 ) -> None:
     stop: list[StopCondition] = [Consensus("AGREED")]
     if budget:
         stop.append(BudgetUSD(budget))
+
+    # Scouts surface only through on_message (they never join the debate
+    # transcript), so capture them here for the report's findings/ subdir.
+    scouts: list[Message] = []
 
     store = JournalStore(journal) if journal else None
     if store and store.exists():
@@ -107,6 +114,8 @@ def _run_loop(
 
     def _on_message(message: Message) -> None:
         _set_spinner(None)
+        if message.author.startswith("scout"):
+            scouts.append(message)
         _print_message(message)
 
     console.print(
@@ -139,12 +148,32 @@ def _run_loop(
     total = result.transcript.total_cost_usd + outcome.extra_cost_usd
     plan = outcome.plan
     shape = f"{len(plan.focuses)} scouts → debate" if plan.discovery else "debate only"
+
+    report_dir: Path | None = None
+    if out_dir is not None:
+        report_dir = write_run_report(
+            out_root=Path(out_dir),
+            timestamp=datetime.now().strftime("%Y%m%d-%H%M%S"),
+            task=task,
+            shape=shape,
+            triage_reason=plan.reason,
+            stopped_by=result.stopped_by,
+            turns=result.turns,
+            resumed=result.resumed,
+            total_cost=total,
+            transcript=result.transcript,
+            scouts=scouts,
+            focuses=plan.focuses,
+        )
+
     console.print(
         Panel(
             f"shape: [bold]{shape}[/bold]\n"
             f"stopped by: [bold]{result.stopped_by}[/bold]\n"
             f"turns: {result.turns}{' (resumed)' if result.resumed else ''}\n"
-            f"total cost: ${total:.4f}" + (f"\njournal: {journal}" if journal else ""),
+            f"total cost: ${total:.4f}"
+            + (f"\njournal: {journal}" if journal else "")
+            + (f"\nreport: {report_dir}" if report_dir else ""),
             title="done",
         )
     )
@@ -172,6 +201,14 @@ def run(
     no_triage: bool = typer.Option(
         False, "--no-triage", help="Skip triage and go straight to debate (no discovery)."
     ),
+    out_dir: str = typer.Option(
+        "out",
+        "--out-dir",
+        help="Root for timestamped run reports (report.md + transcript/findings).",
+    ),
+    no_report: bool = typer.Option(
+        False, "--no-report", help="Don't write a run report to --out-dir."
+    ),
     verbose: int = typer.Option(
         0, "--verbose", "-v", count=True, help="Log progress to stderr (-v info, -vv debug)."
     ),
@@ -188,6 +225,7 @@ def run(
         tools=not no_tools,
         num_agents=num_agents,
         triage=not no_triage,
+        out_dir=None if no_report else out_dir,
         verbose=verbose,
     )
 
