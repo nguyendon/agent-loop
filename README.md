@@ -39,6 +39,10 @@ uv run agentloop review --base main --head HEAD --budget 1.50
 
 # Same review, as a library script you can edit:
 uv run python examples/pr_review.py --base main --head HEAD
+
+# Persist a run, then resume it by reusing the same journal path:
+uv run agentloop debate "Design a cache eviction policy" --rounds 2 --journal run.jsonl
+uv run agentloop debate "Design a cache eviction policy" --rounds 6 --journal run.jsonl
 ```
 
 ## As a library
@@ -56,6 +60,37 @@ loop = Orchestrator(
 result = loop.run()
 print(result.stopped_by, result.transcript.total_cost_usd)
 ```
+
+## State & durability
+
+Three layers, and the loop only owns the first two:
+
+| Layer | What | Where it lives | Persisted by |
+| --- | --- | --- | --- |
+| 1. Transcript | the turns every agent contributes | in memory (`Transcript`) | the journal, if set |
+| 2. Session pointer | each agent's `session_id` | in memory (`CliAgent`) | the journal, if set |
+| 3. Conversation history | each agent's full private context | `~/.claude/...`, `~/.codex/...` | the CLIs themselves |
+
+Agents **don't share memory** — they never read each other's Layer-3 history.
+Information crosses between them only as text: one agent's turn is recorded in
+the transcript, and `Policy.compose()` quotes it into the next agent's prompt.
+
+Pass a `JournalStore` (or `--journal PATH`) to make a run **durable and
+resumable**. Every turn is appended to a JSONL file as it happens, so a crash
+loses at most the in-flight turn. Reusing the same path replays the journal:
+it rebuilds the transcript *and* restores each agent's `session_id`, so the CLIs
+reload their real Layer-3 context and the loop continues exactly where it
+stopped — not from a cold start.
+
+```python
+from agentloop import JournalStore, Orchestrator
+
+loop = Orchestrator(agents, policy, store=JournalStore("run.jsonl"))
+loop.run()  # first call records; a later call with the same path resumes
+```
+
+`max_rounds` counts *total* turns across the journal, so a resumed run caps the
+combined length rather than restarting the budget.
 
 ## Extending it
 
