@@ -54,10 +54,14 @@ def _run(
     marker: str,
     journal: str | None,
     repo: str | None,
+    explore: bool = False,
 ) -> None:
     # cwd is what makes the tool location-independent: git and both agent
     # subprocesses run in the target repo instead of wherever you launched from.
-    claude = ClaudeAgent("claude", cwd=repo)
+    # When exploring, claude runs in plan mode -- read-only tools allowed, edits
+    # blocked -- mirroring codex's read-only sandbox. Without it, claude in print
+    # mode can't read files and only sees what's in the prompt.
+    claude = ClaudeAgent("claude", cwd=repo, permission_mode="plan" if explore else None)
     codex = CodexAgent("codex", sandbox="read-only", cwd=repo)
 
     stop: list[Consensus | BudgetUSD] = [Consensus(marker)]
@@ -120,6 +124,11 @@ def review(
     repo: str | None = typer.Option(
         None, help="Git repo to review (defaults to the current directory)."
     ),
+    explore: bool = typer.Option(
+        False,
+        "--explore",
+        help="Let the agents read the wider repo (not just the diff) to ground findings.",
+    ),
 ) -> None:
     """Two agents review a branch's diff and reconcile their findings."""
     _check_repo(repo)
@@ -128,13 +137,28 @@ def review(
         console.print(f"[yellow]No diff between {base} and {head}.[/yellow]")
         raise typer.Exit(1)
 
+    explore_note = (
+        " You have read-only access to the full repository: read related files, "
+        "check how the changed code is called elsewhere, and inspect history with "
+        "git log/blame to ground your findings. Do not modify anything."
+        if explore
+        else ""
+    )
     task = (
         "You are reviewing a pull request. Find correctness bugs, security issues, "
         "and risky changes. Ignore style nits. Output a concise, prioritized list of "
-        "findings; cite file and line. Here is the diff:\n\n"
+        f"findings; cite file and line.{explore_note} Here is the diff:\n\n"
         f"```diff\n{patch}\n```"
     )
-    _run(task, rounds=rounds, budget=budget, marker="AGREED", journal=journal, repo=repo)
+    _run(
+        task,
+        rounds=rounds,
+        budget=budget,
+        marker="AGREED",
+        journal=journal,
+        repo=repo,
+        explore=explore,
+    )
 
 
 if __name__ == "__main__":
