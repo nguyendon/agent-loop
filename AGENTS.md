@@ -60,9 +60,12 @@ Read-only is the safe default; writing the repo is **always** an explicit
 `--write` opt-in, never inferred from the prompt. The only writer is a single
 `Build.implementer()` (codex `workspace-write`) past the gate — one writer, so no
 worktree/concurrency hazard; reviewers stay read-only and inspect the diff via
-`git diff`. The whole CLI is `task` + `--write` + `--resume <run-dir>` + `--repo`
-+ `-v`; everything else (discovery breadth, rounds, budget backstop, journaling,
-the report dir) is a default or triage-inferred, not a flag.
+`git diff`. `--write` refuses to run on a dirty tree (uncommitted *tracked*
+changes) so the diff is only the fix; committing is left to the human or a
+follow-up agent, never the engine. The whole CLI is `task` + `--write` +
+`--resume <run-dir>` + `--repo` + `-v`; everything else (discovery breadth,
+rounds, budget backstop, journaling, the report dir) is a default or
+triage-inferred, not a flag.
 
 Each run writes `.agentloop/<timestamp>-<slug>/`: `report.md`, `plan.md` (the
 handoff artifact), `journal.jsonl` + `fix.journal.jsonl` (resume), `meta.json`

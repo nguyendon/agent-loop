@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from collections.abc import Sequence
 from datetime import datetime
@@ -87,6 +88,26 @@ def _read_meta(run_dir: Path) -> dict[str, str]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def _tree_is_dirty(repo: str | None) -> bool | None:
+    """True if the git work tree has uncommitted *tracked* changes, False if
+    clean, None if it isn't a git repo (or git is unavailable). Untracked files
+    are ignored -- they don't show up in `git diff` and aren't touched by the fix.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip())
+
+
 def _read_plan(run_dir: Path) -> str | None:
     """The agreed plan body from a prior run's plan.md (header stripped)."""
     path = run_dir / "plan.md"
@@ -100,6 +121,16 @@ def _read_plan(run_dir: Path) -> str | None:
 def _run_loop(
     task: str | None, *, write: bool, resume: str | None, repo: str | None, verbose: int
 ) -> None:
+    # --write edits files in place and leaves the result for you to review/commit,
+    # so the diff must be only the fix -- refuse to run on a dirty tree.
+    if write and _tree_is_dirty(repo):
+        console.print(
+            "[red]working tree has uncommitted changes.[/red] --write edits files in place and "
+            "leaves them for you to review and commit, so it needs a clean tree.\n"
+            "[dim]commit, stash, or branch first, then re-run.[/dim]"
+        )
+        raise typer.Exit(2)
+
     # --- resolve the run directory, task, and any prior agreed plan ----------
     resumed_plan: str | None = None
     if resume is not None:

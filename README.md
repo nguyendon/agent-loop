@@ -79,6 +79,10 @@ uv run agentloop "fix the failing test in tests/test_orchestrator.py" --write
 uv run agentloop "address the issues in PR #42 and verify the suite still passes" --write
 ```
 
+`--write` **needs a clean work tree** — it refuses to run if you have uncommitted
+tracked changes, so the resulting diff is only the fix (commit, stash, or branch
+first; untracked files are fine).
+
 **Committing is left outside the loop, on purpose.** `--write` edits your working
 tree but never commits — the engine stays out of git. Review the diff and commit
 it yourself, or hand the finished run (the `report:` path printed on `done`) to a
