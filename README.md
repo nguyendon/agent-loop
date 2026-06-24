@@ -45,6 +45,24 @@ uv run agentloop debate "Design a cache eviction policy" --rounds 2 --journal ru
 uv run agentloop debate "Design a cache eviction policy" --rounds 6 --journal run.jsonl
 ```
 
+## Run it on another repo
+
+Install the CLI once, then point it anywhere. `git` and both agents run in the
+target directory, so the loop reviews whatever repo you aim it at.
+
+```bash
+uv tool install /path/to/pr-review-agent-loop   # puts `agentloop` on your PATH
+
+# either cd into the target repo...
+cd /path/to/other/repo && agentloop review --base main --head my-feature
+
+# ...or stay put and pass --repo:
+agentloop review --repo /path/to/other/repo --base main --head my-feature
+```
+
+Pick up later changes with `uv tool upgrade agentloop`. To run without installing:
+`uv run --project /path/to/pr-review-agent-loop agentloop review --repo /path/to/other/repo`.
+
 ## As a library
 
 ```python

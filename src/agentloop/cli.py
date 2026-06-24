@@ -7,6 +7,7 @@ uv run agentloop review --base main --head HEAD
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -39,9 +40,25 @@ def _printer() -> Callable[[Message], None]:
     return show
 
 
-def _run(task: str, *, rounds: int, budget: float | None, marker: str, journal: str | None) -> None:
-    claude = ClaudeAgent("claude")
-    codex = CodexAgent("codex", sandbox="read-only")
+def _check_repo(repo: str | None) -> None:
+    if repo is not None and not Path(repo).is_dir():
+        console.print(f"[red]--repo path is not a directory: {repo}[/red]")
+        raise typer.Exit(2)
+
+
+def _run(
+    task: str,
+    *,
+    rounds: int,
+    budget: float | None,
+    marker: str,
+    journal: str | None,
+    repo: str | None,
+) -> None:
+    # cwd is what makes the tool location-independent: git and both agent
+    # subprocesses run in the target repo instead of wherever you launched from.
+    claude = ClaudeAgent("claude", cwd=repo)
+    codex = CodexAgent("codex", sandbox="read-only", cwd=repo)
 
     stop: list[Consensus | BudgetUSD] = [Consensus(marker)]
     if budget:
@@ -82,9 +99,13 @@ def debate(
     journal: str | None = typer.Option(
         None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
     ),
+    repo: str | None = typer.Option(
+        None, help="Directory to run the agents in (defaults to the current directory)."
+    ),
 ) -> None:
     """Have claude and codex debate an open-ended problem until they converge."""
-    _run(task, rounds=rounds, budget=budget, marker=marker, journal=journal)
+    _check_repo(repo)
+    _run(task, rounds=rounds, budget=budget, marker=marker, journal=journal, repo=repo)
 
 
 @app.command()
@@ -96,9 +117,13 @@ def review(
     journal: str | None = typer.Option(
         None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
     ),
+    repo: str | None = typer.Option(
+        None, help="Git repo to review (defaults to the current directory)."
+    ),
 ) -> None:
     """Two agents review a branch's diff and reconcile their findings."""
-    patch = git.diff(base, head)
+    _check_repo(repo)
+    patch = git.diff(base, head, cwd=repo)
     if not patch.strip():
         console.print(f"[yellow]No diff between {base} and {head}.[/yellow]")
         raise typer.Exit(1)
@@ -109,7 +134,7 @@ def review(
         "findings; cite file and line. Here is the diff:\n\n"
         f"```diff\n{patch}\n```"
     )
-    _run(task, rounds=rounds, budget=budget, marker="AGREED", journal=journal)
+    _run(task, rounds=rounds, budget=budget, marker="AGREED", journal=journal, repo=repo)
 
 
 if __name__ == "__main__":
