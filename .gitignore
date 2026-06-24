@@ -10,4 +10,4 @@ build/
 *.jsonl
 
 # run reports
-out/
+.agentloop/

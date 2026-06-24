@@ -6,7 +6,7 @@ agreed plan, what (if anything) was implemented, and the review verdict.
 
 Layout per run::
 
-    out/<timestamp>-<slug>/         (gitignored, created by the CLI up front)
+    .agentloop/<timestamp>-<slug>/   (created by the CLI up front)
       report.md          plan + implementation verdict + run metadata
       plan.md            the agreed plan -- the handoff artifact for --resume --write
       journal.jsonl      stage-1 resume journal (triage/discovery/debate)

@@ -8,7 +8,7 @@ Read-only by default; writing to the repo is always an explicit opt-in:
 
     uv run agentloop "review the uncommitted changes and agree on the top issues"
     uv run agentloop "fix the flaky test in test_orchestrator.py" --write
-    uv run agentloop --resume out/20260624-120000-fix-the-flaky-test --write
+    uv run agentloop --resume .agentloop/20260624-120000-fix-the-flaky-test --write
 """
 
 from __future__ import annotations
@@ -49,6 +49,9 @@ _STYLES = {
 _ROUNDS = 8  # max debate turns
 _NUM_AGENTS = 4  # max discovery scouts (triage picks 2..N)
 _BUDGET_USD = 10.0  # runaway-cost backstop (no flag; tunable here)
+# Runs live in a dotted, tool-owned dir -- agentloop runs *inside* the repo it's
+# inspecting, and a bare `out/` would collide with that project's own build output.
+_RUNS_DIR = ".agentloop"
 
 
 def _setup_logging(verbosity: int) -> None:
@@ -113,7 +116,7 @@ def _run_loop(
         console.print(f"[dim]resuming {run_dir}[/dim]\n")
     else:
         when = datetime.now().strftime("%Y%m%d-%H%M%S")
-        run_dir = Path("out") / f"{when}-{slug(task or '')}"
+        run_dir = Path(_RUNS_DIR) / f"{when}-{slug(task or '')}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
     if not task:
@@ -273,7 +276,7 @@ def run(
     resume: str | None = typer.Option(
         None,
         "--resume",
-        help="Continue a prior run directory (e.g. out/<run>); add --write to fix.",
+        help="Continue a prior run directory (e.g. .agentloop/<run>); add --write to fix.",
     ),
     repo: str | None = typer.Option(
         None, "--repo", help="Directory to run the agents in (defaults to the current directory)."

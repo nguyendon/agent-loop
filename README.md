@@ -62,8 +62,11 @@ uv run agentloop "review the diff between this branch and main; agree on what mu
 uv run agentloop "audit src/agentloop/adapters for correctness and error handling; agree on the top findings"
 ```
 
-Each run writes `out/<timestamp>-<slug>/` with `report.md`, `plan.md`, and the full
-debate. Nothing in your tree is modified.
+Each run writes `.agentloop/<timestamp>-<slug>/` with `report.md`, `plan.md`, and the
+full debate. (A dotted, tool-owned dir — agentloop runs *inside* the repo it's
+inspecting, so it stays out of that project's `out/`/build dirs. Add `.agentloop/`
+to the target repo's `.gitignore` if you don't want the runs tracked.) Nothing in
+your tree is modified.
 
 ### Review *and* implement the fix (`--write`)
 
@@ -89,12 +92,12 @@ The careful path — you see the plan before anything writes:
 ```bash
 # 1. read-only review → produces the plan
 uv run agentloop "review the uncommitted changes and agree on the fixes"
-#    → done panel prints e.g.  report: out/20260624-143005-review-the-uncommitted-changes
+#    → done panel prints e.g.  report: .agentloop/20260624-143005-review-the-uncommitted-changes
 
-# 2. read out/<run>/plan.md and decide it's right
+# 2. read .agentloop/<run>/plan.md and decide it's right
 
 # 3. hand that exact plan to the fix loop — no re-debate
-uv run agentloop --resume out/20260624-143005-review-the-uncommitted-changes --write
+uv run agentloop --resume .agentloop/20260624-143005-review-the-uncommitted-changes --write
 ```
 
 The whole surface is `task` + `--write` + `--resume <run-dir>` + `--repo` + `-v`.
@@ -182,10 +185,10 @@ the transcript, and `Policy.compose()` quotes it into the next agent's prompt.
 Every run is **durable and resumable**. Stage 1 (triage/discovery/debate)
 journals to `journal.jsonl`; when the write gate is crossed, stage 2
 (implement/review) journals to the sibling `fix.journal.jsonl`. The CLI creates
-both automatically under `out/<run>/`; library callers get the same default by
-passing a `JournalStore` to `solve()`, or can wire the journals explicitly.
+both automatically under `.agentloop/<run>/`; library callers get the same default
+by passing a `JournalStore` to `solve()`, or can wire the journals explicitly.
 Every turn is appended as it happens, so a crash loses at most the in-flight
-turn. Replaying the run (`--resume out/<run>`, or reusing the same journal path
+turn. Replaying the run (`--resume .agentloop/<run>`, or reusing the same journal path
 in code) rebuilds the transcript *and* restores each agent's `session_id`, so
 the CLIs reload their real Layer-3 context and the loop continues exactly where
 it stopped — not from a cold start.

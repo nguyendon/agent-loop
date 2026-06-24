@@ -62,11 +62,12 @@ Read-only is the safe default; writing the repo is **always** an explicit
 worktree/concurrency hazard; reviewers stay read-only and inspect the diff via
 `git diff`. The whole CLI is `task` + `--write` + `--resume <run-dir>` + `--repo`
 + `-v`; everything else (discovery breadth, rounds, budget backstop, journaling,
-the `out/` report dir) is a default or triage-inferred, not a flag.
+the report dir) is a default or triage-inferred, not a flag.
 
-Each run writes `out/<timestamp>-<slug>/`: `report.md`, `plan.md` (the handoff
-artifact), `journal.jsonl` (resume), `meta.json` (task), `transcript/debate.md`
-+ `transcript/fix.md`, and `findings/`.
+Each run writes `.agentloop/<timestamp>-<slug>/`: `report.md`, `plan.md` (the
+handoff artifact), `journal.jsonl` + `fix.journal.jsonl` (resume), `meta.json`
+(task), `transcript/debate.md` + `transcript/fix.md`, and `findings/`. It's a
+dotted, tool-owned dir so it doesn't collide with the inspected project's `out/`.
 
 The CLI is intentionally thin: it hands the agents a prompt and lets them do the
 work with their own tools. Task-specific logic (e.g. fetching a diff) belongs in
