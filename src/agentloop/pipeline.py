@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from .adapters.claude import ClaudeAgent
 from .adapters.codex import CodexAgent
 from .agent import Agent, AgentError
-from .domain import Message, Transcript
+from .domain import Message, Transcript, TurnResult
 from .orchestrator import LoopResult, Orchestrator, fan_out
 from .policy import DebatePolicy
 from .stop import Consensus, StopCondition
@@ -66,6 +66,28 @@ _MAX_FIX_ATTEMPTS = 3  # implement→review rounds before giving up
 _REVIEW_ROUNDS = 4  # max reviewer turns per attempt
 
 
+def _noop(*_: object) -> None:
+    pass
+
+
+# claude runs the debate/review in plan mode; headless, that mode makes it try to
+# "finalize a plan" (ExitPlanMode) and defer its findings to a nonexistent plan
+# file. Tell it the reply text itself is the deliverable.
+_INLINE_NOTE = (
+    "This is a non-interactive review: there is no ExitPlanMode tool and no separate "
+    "plan file. Put your complete findings directly in your reply text."
+)
+
+# Final synthesis: distill the converged debate into a clean, standalone result.
+_SYNTHESIS_PROMPT = (
+    "Two reviewers debated the task below and converged. Write the FINAL agreed result for "
+    "the user as a clean, self-contained markdown document — the prioritized findings, or the "
+    "answer to the question. Include only what they agreed on; drop the back-and-forth, the "
+    "consensus chatter, and any mention of plan files or tools. Do not add a preamble.\n\n"
+    "--- TASK ---\n{task}\n\n--- DEBATE ---\n{debate}"
+)
+
+
 @dataclass(slots=True)
 class Plan:
     discovery: bool
@@ -86,8 +108,9 @@ class FixResult:
 @dataclass(slots=True)
 class SolveResult:
     plan: Plan
-    plan_text: str  # the agreed plan (stage-1 output, or a resumed plan)
+    plan_text: str  # the RAW agreed plan -- the executable handoff for --write/resume
     extra_cost_usd: float  # triage + discovery + fix (the debate cost is in loop.transcript)
+    summary: str = ""  # synthesized human-readable findings for the report (empty on resume)
     loop: LoopResult | None = None  # None on a resume-handoff (stage 1 already ran)
     fix: FixResult | None = None  # None unless write=True
 
@@ -108,22 +131,41 @@ class Build:
     # so this is how you point it at a supported one (e.g. gpt-5.5).
     claude_model: str | None = field(default_factory=lambda: os.getenv("AGENTLOOP_CLAUDE_MODEL"))
     codex_model: str | None = field(default_factory=lambda: os.getenv("AGENTLOOP_CODEX_MODEL"))
+    # Cheap, latency-sensitive phases (triage, discovery scouts, the findings
+    # synthesis) run on a fast model; the debate, implementer, reviewers, and
+    # preflight keep the strong default. fast_codex falls back to codex_model so
+    # it never reaches for an unsupported default.
+    fast_claude_model: str | None = field(
+        default_factory=lambda: os.getenv("AGENTLOOP_FAST_CLAUDE_MODEL", "claude-haiku-4-5")
+    )
+    fast_codex_model: str | None = field(
+        default_factory=lambda: os.getenv("AGENTLOOP_FAST_CODEX_MODEL")
+    )
 
     # Factories return the Agent abstraction (callers never need the concrete
     # CLI type); this also lets tests substitute a Build with fake agents.
-    def claude(self, name: str = "claude", system_prompt: str | None = None) -> Agent:
+    def claude(
+        self,
+        name: str = "claude",
+        system_prompt: str | None = None,
+        *,
+        fast: bool = False,
+        tools: bool = True,
+    ) -> Agent:
         return ClaudeAgent(
             name,
-            model=self.claude_model,
+            model=(self.fast_claude_model or self.claude_model) if fast else self.claude_model,
             cwd=self.repo,
-            permission_mode="plan",
+            permission_mode="plan" if tools else None,
             system_prompt=system_prompt,
         )
 
-    def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
+    def codex(
+        self, name: str = "codex", system_prompt: str | None = None, *, fast: bool = False
+    ) -> Agent:
         return CodexAgent(
             name,
-            model=self.codex_model,
+            model=(self.fast_codex_model or self.codex_model) if fast else self.codex_model,
             cwd=self.repo,
             sandbox="read-only",
             system_prompt=system_prompt,
@@ -136,9 +178,12 @@ class Build:
 
     def scout(self, index: int, focus: str) -> Agent:
         # Alternate model families for diversity; the lens comes from the focus.
+        # Scouts are breadth-first, so they run on the fast tier.
         system_prompt = f"You are an investigator. Focus specifically on: {focus}."
         name = f"scout{index + 1}"
-        return self.codex(name, system_prompt) if index % 2 else self.claude(name, system_prompt)
+        if index % 2:
+            return self.codex(name, system_prompt, fast=True)
+        return self.claude(name, system_prompt, fast=True)
 
 
 def parse_plan(raw: str, *, max_agents: int) -> Plan:
@@ -173,6 +218,31 @@ def agreed_plan_text(transcript: Transcript) -> str:
     return messages[-1].content.strip() if messages else ""
 
 
+def synthesize(
+    task: str,
+    transcript: Transcript,
+    *,
+    build: Build,
+    on_status: Callable[[str], None] = _noop,
+) -> tuple[str, float]:
+    """Distill a converged debate into the final, standalone result the report
+    shows. The last debate turn is usually "AGREED, nothing to add" -- the real
+    findings are spread across earlier turns -- so a cheap fast-tier pass rewrites
+    them cleanly. Falls back to the raw converged turn if synthesis errors.
+    """
+    on_status("summarizing findings…")
+    debate = "\n\n".join(f"## {m.author}\n{m.content}" for m in transcript.agent_messages)
+    try:
+        result = build.claude("synthesis", fast=True, tools=False).send(
+            _SYNTHESIS_PROMPT.format(task=task, debate=debate)
+        )
+    except AgentError:
+        log.warning("synthesis failed; falling back to the raw converged turn")
+        return agreed_plan_text(transcript), 0.0
+    text = result.text.strip() or agreed_plan_text(transcript)
+    return text, result.cost_usd or 0.0
+
+
 def _implement_prompt(task: str, plan_text: str, feedback: str) -> str:
     prompt = (
         "You are implementing an agreed plan in this repository. Make the changes directly "
@@ -202,10 +272,6 @@ def _requested_changes(transcript: Transcript) -> str:
     for message in transcript.agent_messages:
         by_author[message.author] = message
     return "\n\n".join(f"{m.author}: {m.content.strip()}" for m in by_author.values())
-
-
-def _noop(*_: object) -> None:
-    pass
 
 
 class _ReviewStore:
@@ -242,27 +308,41 @@ class _ReviewStore:
 
 _PREFLIGHT_PROMPT = "Reply with the single word: ok"
 _MODEL_HINT = (
-    "\nIf an agent rejects its model, set AGENTLOOP_CODEX_MODEL / "
-    "AGENTLOOP_CLAUDE_MODEL to one your account supports (e.g. gpt-5.5)."
+    "\nIf an agent rejects its model, set the matching env var to one your account "
+    "supports: AGENTLOOP_CODEX_MODEL / AGENTLOOP_CLAUDE_MODEL (strong tier) or "
+    "AGENTLOOP_FAST_CLAUDE_MODEL / AGENTLOOP_FAST_CODEX_MODEL (triage & scouts)."
 )
 
 
-def preflight(build: Build, *, on_status: Callable[[str], None] = _noop) -> None:
-    """Cheap health check before the real work: ping each CLI in parallel and
-    fail fast with the actual error (bad model, not logged in, missing binary)
-    instead of dying minutes later mid-debate."""
-    on_status("checking agents…")
-    # The AgentError already carries the agent's name, so a flat list is enough.
-    agents = [build.claude("preflight"), build.codex("preflight")]
-    errors: list[str] = []
+def _ping(agent: Agent) -> str | None:
+    """Send the preflight prompt; return the error string if it fails, else None.
+    The AgentError already carries the agent's name."""
+    try:
+        agent.send(_PREFLIGHT_PROMPT)
+    except AgentError as exc:
+        return str(exc)
+    return None
+
+
+def _preflight_errors(build: Build) -> list[str]:
+    """Ping the strong-tier claude + codex (the models the debate/fix use) in
+    parallel; return any failures. Runnable in a thread so it can overlap triage."""
+    agents = [build.claude("preflight", tools=False), build.codex("preflight")]
     with ThreadPoolExecutor(max_workers=len(agents)) as pool:
-        for future in [pool.submit(a.send, _PREFLIGHT_PROMPT) for a in agents]:
-            try:
-                future.result()
-            except AgentError as exc:
-                errors.append(str(exc))
+        return [err for err in pool.map(_ping, agents) if err is not None]
+
+
+def _raise_preflight(errors: Sequence[str]) -> None:
     if errors:
         raise AgentError("preflight failed:\n  " + "\n  ".join(errors) + _MODEL_HINT)
+
+
+def preflight(build: Build, *, on_status: Callable[[str], None] = _noop) -> None:
+    """Cheap health check before the real work: ping each CLI and fail fast with
+    the actual error (bad model, not logged in, missing binary) instead of dying
+    minutes later mid-debate."""
+    on_status("checking agents…")
+    _raise_preflight(_preflight_errors(build))
 
 
 def fix(
@@ -321,7 +401,10 @@ def fix(
             prior_review_turns = 0
 
         # A fresh read-only debate over the actual diff; consensus on APPROVED ends it.
-        reviewers = [build.claude("reviewer-claude"), build.codex("reviewer-codex")]
+        reviewers = [
+            build.claude("reviewer-claude", system_prompt=_INLINE_NOTE),
+            build.codex("reviewer-codex"),
+        ]
         review = Orchestrator(
             reviewers,
             DebatePolicy(
@@ -381,17 +464,32 @@ def solve(
     extra_cost = 0.0
     loop_result: LoopResult | None = None
     plan_text = resumed_plan or ""
+    summary = ""
     effective_fix_store = fix_store or (
         store.fix_journal() if isinstance(store, JournalStore) else None
     )
 
-    preflight(build, on_status=on_status)
-
     # ---- stage 1: produce the plan (skipped on a resume-handoff) ----
     if resumed_plan is None:
         if triage:
+            # Triage runs on the fast tier, so it can't vouch for the strong
+            # debate models -- run the full (strong claude + codex) preflight in
+            # parallel with the triage turn so it validates everything at no
+            # extra wall-clock. Aggregate failures from both.
             on_status("triaging task…")
-            result = build.claude("triage").send(_TRIAGE_PROMPT.format(max=num_agents, task=task))
+            result: TurnResult | None = None
+            triage_error: str | None = None
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                preflight_check = pool.submit(_preflight_errors, build)
+                try:
+                    result = build.claude("triage", fast=True, tools=False).send(
+                        _TRIAGE_PROMPT.format(max=num_agents, task=task)
+                    )
+                except AgentError as exc:
+                    triage_error = str(exc)
+                errors = preflight_check.result()
+            _raise_preflight(([triage_error] if triage_error else []) + errors)
+            assert result is not None  # no errors raised => triage succeeded
             extra_cost += result.cost_usd or 0.0
             plan = parse_plan(result.text, max_agents=num_agents)
             log.info(
@@ -400,6 +498,8 @@ def solve(
                 len(plan.focuses),
                 plan.reason,
             )
+        else:
+            preflight(build, on_status=on_status)
 
         seed = task
         if plan.discovery:
@@ -425,7 +525,7 @@ def solve(
                 "prioritized set."
             )
 
-        debaters: list[Agent] = [build.claude(), build.codex()]
+        debaters: list[Agent] = [build.claude(system_prompt=_INLINE_NOTE), build.codex()]
         loop_result = Orchestrator(
             debaters,
             DebatePolicy(seed),
@@ -436,7 +536,17 @@ def solve(
             on_parallel_start=on_parallel_start,
             store=store,
         ).run()
+        # The RAW converged plan is the executable handoff (plan.md / --write /
+        # resume); a separate fast-tier synthesis is the human-readable report.
         plan_text = agreed_plan_text(loop_result.transcript)
+        summary, synth_cost = synthesize(
+            task, loop_result.transcript, build=build, on_status=on_status
+        )
+        extra_cost += synth_cost
+    else:
+        # Resume-handoff: stage 1 already ran, so nothing has validated the CLIs
+        # this session -- preflight before the (expensive, write-capable) fix loop.
+        preflight(build, on_status=on_status)
 
     # ---- gate: cross into the fix loop only when asked ----
     fix_result: FixResult | None = None
@@ -457,6 +567,7 @@ def solve(
         plan=plan,
         plan_text=plan_text,
         extra_cost_usd=extra_cost,
+        summary=summary,
         loop=loop_result,
         fix=fix_result,
     )

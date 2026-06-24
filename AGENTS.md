@@ -67,6 +67,17 @@ follow-up agent, never the engine. The whole CLI is `task` + `--write` +
 rounds, budget backstop, journaling, the report dir) is a default or
 triage-inferred, not a flag.
 
+`Build` has two model tiers: triage, discovery scouts, and the findings synthesis
+run on the **fast** tier (`fast_claude_model`/`fast_codex_model`, env-overridable;
+claude defaults to `claude-haiku-4-5`), while the debate, implementer, reviewers,
+and preflight use the strong default. Triage runs tool-less and on the fast tier,
+so the full strong-tier preflight (claude + codex) runs *in parallel with* the
+triage turn — validating the debate's models at no extra wall-clock. Stage-1
+debaters/reviewers get a system prompt (`_INLINE_NOTE`) telling claude to put
+findings in its reply (plan mode otherwise makes it defer to a nonexistent plan
+file headless), and `synthesize()` distills the converged debate into the clean
+`report.md`/`plan.md` text rather than scraping the last (often "AGREED") turn.
+
 Each run writes `.agentloop/<timestamp>-<slug>/`: `report.md`, `plan.md` (the
 handoff artifact), `journal.jsonl` + `fix.journal.jsonl` (resume), `meta.json`
 (task), `transcript/debate.md` + `transcript/fix.md`, and `findings/`. It's a
@@ -98,9 +109,11 @@ to its real Layer-3 session.
   rather than guessing the schema. On failure, surface the CLI's *real* error:
   `codex exec` exits non-zero but reports the cause as a stdout event (stderr is
   just stdin noise), so `CodexAgent._failure_detail` digs it out. `solve()`
-  preflights both CLIs first so misconfig (bad model, not logged in) fails in
-  seconds; per-CLI model overrides come from `AGENTLOOP_CODEX_MODEL` /
-  `AGENTLOOP_CLAUDE_MODEL` so the user's global CLI config is untouched.
+  preflights both CLIs (overlapped with the triage turn, or up front on the
+  no-triage/resume paths) so misconfig (bad model, not logged in) fails in
+  seconds; models are env-overridable per CLI and per tier
+  (`AGENTLOOP_CODEX_MODEL` / `AGENTLOOP_CLAUDE_MODEL` and their
+  `AGENTLOOP_FAST_*` counterparts) so the user's global CLI config is untouched.
 - Keep the loop engine task-agnostic: new behavior belongs in a `Policy`,
   `StopCondition`, or `Agent` subclass, not in `Orchestrator`.
 - Commits: small and logical, imperative subject, Conventional-Commit prefix

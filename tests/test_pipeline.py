@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from agentloop.adapters.claude import ClaudeAgent
+from agentloop.adapters.codex import CodexAgent
 from agentloop.agent import Agent, AgentError
 from agentloop.domain import Message, TurnResult
 from agentloop.pipeline import Build, fix, preflight, solve
@@ -25,6 +27,7 @@ class _Fake(Agent):
         self.name = name
         self._replies = replies
         self._error = error
+        self.prompts: list[str] = []
         self.session_id: str | None = None
         self.turns = 0
 
@@ -33,6 +36,7 @@ class _Fake(Agent):
         return self.turns == 0
 
     def send(self, prompt: str) -> TurnResult:
+        self.prompts.append(prompt)
         if self._error is not None:
             raise AgentError(self._error)
         reply = self._replies[min(self.turns, len(self._replies) - 1)]
@@ -49,6 +53,7 @@ class FakeBuild(Build):
         self.approve_on_attempt = approve_on_attempt
         self.attempt = 0
         self.created: list[str] = []
+        self.last_implementer: _Fake | None = None
 
     def _debater(self, name: str) -> _Fake:
         return _Fake(name, [_PLAN, "AGREED"])
@@ -59,15 +64,26 @@ class FakeBuild(Build):
             name, ["APPROVED, correct and complete" if approved else "needs work: edge case"]
         )
 
-    def claude(self, name: str = "claude", system_prompt: str | None = None) -> Agent:
+    def claude(
+        self,
+        name: str = "claude",
+        system_prompt: str | None = None,
+        *,
+        fast: bool = False,
+        tools: bool = True,
+    ) -> Agent:
         self.created.append(name)
         if name == "triage":
             return _Fake(name, [_TRIAGE_NO_DISCOVERY])
+        if name == "synthesis":
+            return _Fake(name, [f"SYNTHESIZED: {_PLAN}"])
         if name.startswith("reviewer"):
             return self._reviewer(name)
         return self._debater(name)
 
-    def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
+    def codex(
+        self, name: str = "codex", system_prompt: str | None = None, *, fast: bool = False
+    ) -> Agent:
         self.created.append(name)
         if name.startswith("reviewer"):
             return self._reviewer(name)
@@ -76,7 +92,9 @@ class FakeBuild(Build):
     def implementer(self, name: str = "implementer") -> Agent:
         self.attempt += 1
         self.created.append(name)
-        return _Fake(name, [f"implemented attempt {self.attempt}; ran tests, all green"])
+        agent = _Fake(name, [f"implemented attempt {self.attempt}; ran tests, all green"])
+        self.last_implementer = agent
+        return agent
 
 
 def test_gate_stops_at_plan_without_write() -> None:
@@ -85,8 +103,38 @@ def test_gate_stops_at_plan_without_write() -> None:
 
     assert result.fix is None  # never crossed the gate
     assert result.loop is not None
-    assert "off-by-one" in result.plan_text  # the agreed plan was extracted
+    # plan_text is the RAW agreed plan (the executable handoff); the synthesized,
+    # human-readable text is kept separate in summary (shown in report.md).
+    assert "off-by-one" in result.plan_text
+    assert "SYNTHESIZED" not in result.plan_text
+    assert "SYNTHESIZED" in result.summary
+    assert "synthesis" in build.created
     assert "implementer" not in build.created
+
+
+class _StrongClaudeBrokenBuild(FakeBuild):
+    """Fast-tier claude (triage) works, but the strong tier is misconfigured."""
+
+    def claude(
+        self,
+        name: str = "claude",
+        system_prompt: str | None = None,
+        *,
+        fast: bool = False,
+        tools: bool = True,
+    ) -> Agent:
+        self.created.append(name)
+        if fast:
+            return _Fake(name, [_TRIAGE_NO_DISCOVERY if name == "triage" else "ok"])
+        return _Fake(name, [], error="claude: exit 1: the 'bad-strong' model is not supported")
+
+
+def test_triage_path_still_preflights_the_strong_claude_model() -> None:
+    # Regression guard: triage runs on the fast tier, so the strong claude (used
+    # by the debate) must still be validated up front -- not fail late mid-debate.
+    with pytest.raises(AgentError) as excinfo:
+        solve("review it", build=_StrongClaudeBrokenBuild(), rounds=8, stop=[], write=False)
+    assert "not supported" in str(excinfo.value)
 
 
 def test_write_crosses_gate_and_approves_first_try() -> None:
@@ -99,6 +147,11 @@ def test_write_crosses_gate_and_approves_first_try() -> None:
     assert build.created.count("implementer") == 1
     # The implementer's report is captured in the fix transcript.
     assert any(m.author == "implementer" for m in result.fix.transcript.messages)
+    # The handoff implements the RAW agreed plan, never the human synthesis.
+    assert build.last_implementer is not None
+    implement_prompt = build.last_implementer.prompts[0]
+    assert "off-by-one" in implement_prompt
+    assert "SYNTHESIZED" not in implement_prompt
 
 
 def test_fix_loops_until_reviewers_approve() -> None:
@@ -131,7 +184,9 @@ def test_resumed_plan_skips_stage_one() -> None:
 class _UnhealthyBuild(FakeBuild):
     """codex preflight fails as it would for an unsupported model."""
 
-    def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
+    def codex(
+        self, name: str = "codex", system_prompt: str | None = None, *, fast: bool = False
+    ) -> Agent:
         self.created.append(name)
         return _Fake(name, [], error="codex: exit 1: The 'gpt-5.3-codex' model is not supported")
 
@@ -153,11 +208,20 @@ class _ResumeReviewBuild(Build):
         super().__init__(repo=None)
         self.created: list[str] = []
 
-    def claude(self, name: str = "claude", system_prompt: str | None = None) -> Agent:
+    def claude(
+        self,
+        name: str = "claude",
+        system_prompt: str | None = None,
+        *,
+        fast: bool = False,
+        tools: bool = True,
+    ) -> Agent:
         self.created.append(name)
         return _Fake(name, ["APPROVED, correct and complete"])
 
-    def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
+    def codex(
+        self, name: str = "codex", system_prompt: str | None = None, *, fast: bool = False
+    ) -> Agent:
         self.created.append(name)
         return _Fake(name, ["APPROVED, correct and complete"])
 
@@ -171,6 +235,27 @@ def test_build_reads_model_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -
     build = Build()
     assert build.codex_model == "gpt-5.5"
     assert build.claude_model == "claude-haiku-4-5"
+
+
+def test_fast_tier_uses_fast_model_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENTLOOP_FAST_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("AGENTLOOP_FAST_CODEX_MODEL", raising=False)
+    monkeypatch.setenv("AGENTLOOP_CODEX_MODEL", "gpt-5.5")
+    build = Build()
+
+    # fast claude defaults to haiku; fast codex falls back to the strong codex
+    # model so it never reaches for an unsupported default.
+    assert build.fast_claude_model == "claude-haiku-4-5"
+    triage = build.claude("triage", fast=True, tools=False)
+    assert isinstance(triage, ClaudeAgent)
+    assert triage.model == "claude-haiku-4-5"
+    assert triage.permission_mode is None  # tool-less
+    debater = build.claude()
+    assert isinstance(debater, ClaudeAgent)
+    assert debater.permission_mode == "plan"  # strong tier keeps tools
+    fast_codex = build.codex("scout2", fast=True)
+    assert isinstance(fast_codex, CodexAgent)
+    assert fast_codex.model == "gpt-5.5"
 
 
 def test_fix_resumes_in_flight_review_without_restarting_attempt(tmp_path) -> None:

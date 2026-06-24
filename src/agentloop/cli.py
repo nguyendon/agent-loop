@@ -264,6 +264,7 @@ def _run_loop(
         resumed=resume is not None,
         total_cost=total,
         plan_text=outcome.plan_text,
+        summary=outcome.summary,
         transcript=loop.transcript if loop else None,
         scouts=scouts,
         focuses=plan.focuses,

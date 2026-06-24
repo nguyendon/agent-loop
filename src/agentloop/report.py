@@ -50,7 +50,7 @@ def _render_report(
     turns: int,
     resumed: bool,
     total_cost: float,
-    plan_text: str,
+    findings: str,
     fix: FixResult | None,
 ) -> str:
     lines = [
@@ -69,7 +69,7 @@ def _render_report(
         "",
         "## Plan",
         "",
-        plan_text.strip() or "_(no plan produced)_",
+        findings.strip() or "_(no plan produced)_",
         "",
     ]
     if fix is not None:
@@ -110,6 +110,7 @@ def write_run_report(
     resumed: bool,
     total_cost: float,
     plan_text: str,
+    summary: str = "",
     transcript: Transcript | None = None,
     scouts: Sequence[Message] = (),
     focuses: Sequence[str] = (),
@@ -117,9 +118,11 @@ def write_run_report(
 ) -> Path:
     """Write a run's report tree into ``run_dir`` (already created) and return it.
 
-    ``transcript`` is the stage-1 debate (absent on a resume-handoff, where stage
-    1 ran in a prior process). ``scouts`` are the discovery turns -- they never
-    join the debate transcript -- and ``focuses`` labels them positionally.
+    ``plan_text`` is the RAW agreed plan -- the executable handoff written to
+    ``plan.md`` and read back on ``--resume --write``. ``summary`` is the
+    human-readable synthesis shown in ``report.md`` (falls back to ``plan_text``
+    when absent, e.g. on a resume-handoff). ``transcript`` is the stage-1 debate;
+    ``scouts``/``focuses`` are the discovery turns, which never join it.
     """
     (run_dir / "transcript").mkdir(parents=True, exist_ok=True)
 
@@ -133,7 +136,7 @@ def write_run_report(
             turns=turns,
             resumed=resumed,
             total_cost=total_cost,
-            plan_text=plan_text,
+            findings=summary.strip() or plan_text,
             fix=fix,
         ),
         encoding="utf-8",

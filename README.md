@@ -30,13 +30,19 @@ Requires the `claude` and `codex` CLIs installed and logged in. Each run does a
 quick **preflight** — a trivial ping to both CLIs — and aborts in seconds with the
 real error if one is misconfigured, rather than dying minutes into a debate.
 
-If a CLI rejects its default model (e.g. `codex exec` on a ChatGPT account that
-can't use `gpt-*-codex`), point agentloop at a supported one without touching the
-CLI's global config:
+Models are configurable per CLI and per tier, all via env (your global CLI config
+is untouched). The cheap, latency-sensitive phases — **triage, discovery scouts,
+and the findings synthesis** — run on a **fast tier** (claude defaults to
+`claude-haiku-4-5`); the debate, implementer, and reviewers keep the strong
+default. (Preflight pings the strong models, since those are what the run relies
+on.) The fast tier is the main speed lever, since triage sits on the serial
+critical path of every run.
 
 ```bash
-export AGENTLOOP_CODEX_MODEL=gpt-5.5      # scoped to agentloop's codex agents
-export AGENTLOOP_CLAUDE_MODEL=...         # optional; same for claude
+export AGENTLOOP_CODEX_MODEL=gpt-5.5         # strong codex (e.g. ChatGPT accounts can't use gpt-*-codex)
+export AGENTLOOP_CLAUDE_MODEL=...            # strong claude (default: the CLI's own default)
+export AGENTLOOP_FAST_CLAUDE_MODEL=...       # fast tier; default claude-haiku-4-5
+export AGENTLOOP_FAST_CODEX_MODEL=...         # fast tier; defaults to AGENTLOOP_CODEX_MODEL
 ```
 
 ## Quick start
@@ -134,12 +140,18 @@ A cheap **triage** turn decides the shape:
   picks independent angles and fans out parallel scouts, pools their findings, then
   seeds the debate with them.
 
-The agents have **read-only** tool access for review (claude in plan mode, codex in
-its read-only sandbox), so they ground findings in the real code and history. Only
-`--write` lifts that, and only past the agreed plan: a single write-capable agent
-(codex `workspace-write`) makes the edits while the reviewers stay read-only. The
-final panel reports the shape used (`N scouts → debate`, `… → fix`) and the total
-cost across all phases.
+Triage and the discovery scouts run on the **fast model tier** (and triage uses no
+tools — it only classifies the task), so the serial steps before the debate stay
+cheap; the debate itself uses the strong model. After the debate converges, a
+fast-tier pass distills the back-and-forth into the clean findings you see in
+`report.md`. `plan.md` keeps the *raw* agreed plan — that's the executable
+artifact the `--write`/`--resume` handoff implements, so it's never the
+summarized version. The agents have **read-only** tool
+access for review (claude in plan mode, codex in its read-only sandbox), so they
+ground findings in the real code and history. Only `--write` lifts that, and only
+past the agreed plan: a single write-capable agent (codex `workspace-write`) makes
+the edits while the reviewers stay read-only. The final panel reports the shape
+used (`N scouts → debate`, `… → fix`) and the total cost across all phases.
 
 ## Run it on another repo
 

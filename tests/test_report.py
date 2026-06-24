@@ -93,6 +93,30 @@ def test_write_phase_adds_implementation_and_fix_transcript(tmp_path: Path) -> N
     assert "implementer" in fix_md and "reviewer-claude" in fix_md
 
 
+def test_summary_drives_report_while_plan_md_stays_raw(tmp_path: Path) -> None:
+    run_dir = write_run_report(
+        _run_dir(tmp_path),
+        task="review the diff",
+        when="20260624-120000",
+        shape="debate only",
+        triage_reason="",
+        stopped_by="Consensus",
+        turns=2,
+        resumed=False,
+        total_cost=0.02,
+        plan_text="RAW agreed plan: change foo.py line 12, the executable handoff.",
+        summary="# Findings\n\nClean human-readable synthesis for the report.",
+        transcript=_debate(),
+    )
+    report = (run_dir / "report.md").read_text()
+    plan = (run_dir / "plan.md").read_text()
+    # report.md shows the synthesized summary; plan.md keeps the raw handoff plan.
+    assert "human-readable synthesis" in report
+    assert "RAW agreed plan" not in report
+    assert "RAW agreed plan" in plan
+    assert "human-readable synthesis" not in plan
+
+
 def test_no_transcript_on_resume_handoff(tmp_path: Path) -> None:
     run_dir = write_run_report(
         _run_dir(tmp_path),
