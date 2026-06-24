@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,11 @@ def _setup_logging(verbosity: int) -> None:
     logger.addHandler(
         RichHandler(console=Console(stderr=True), show_path=False, show_time=False, markup=True)
     )
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
 
 
 def _print_message(message: Message) -> None:
@@ -153,8 +159,17 @@ def _run_loop(
         _print_message(message)
 
     mode = "write" if write else "read-only"
-    console.print(f"[dim]claude ⇄ codex · {mode} · up to {_ROUNDS} turns · ctrl-c to stop[/dim]\n")
+    # Set expectations up front: each turn is a whole agent subprocess, so the
+    # spinner can sit on one phase for minutes -- that's normal, not a hang.
+    eta = "expect ~10-25 min" if write else "expect ~2-10 min"
+    console.print(
+        f"[dim]claude ⇄ codex · {mode} · up to {_ROUNDS} turns · {eta} · ctrl-c to stop[/dim]"
+    )
+    console.print(
+        "[dim]each turn runs a full agent with tools; long pauses are normal, not a hang.[/dim]\n"
+    )
 
+    start = time.monotonic()
     try:
         outcome = solve(
             task,
@@ -224,11 +239,13 @@ def _run_loop(
         verdict = (
             f"\nverdict: [bold]{'APPROVED' if fix.approved else 'changes still needed'}[/bold]"
         )
+    elapsed = time.monotonic() - start
     console.print(
         Panel(
             f"shape: [bold]{shape}[/bold]\n"
             f"stopped by: [bold]{stopped_by}[/bold]\n"
             f"turns: {turns}{verdict}\n"
+            f"elapsed: {_fmt_elapsed(elapsed)}\n"
             f"total cost: ${total:.4f}\n"
             f"report: {run_dir}",
             title="done",

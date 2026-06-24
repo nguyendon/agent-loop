@@ -92,9 +92,24 @@ uv run agentloop --resume out/20260624-143005-review-the-uncommitted-changes --w
 ```
 
 The whole surface is `task` + `--write` + `--resume <run-dir>` + `--repo` + `-v`.
-A turn runs an agent subprocess to completion (often minutes with tools), so the
-CLI shows a spinner; pass `-v`/`-vv` to replace it with per-turn log lines (timings,
-cost, the command run) on stderr.
+
+#### Expect it to take a while
+
+This is **not** instant — every turn runs a full agent CLI to completion (with
+tools), and there are several turns across triage, discovery, debate, and the fix
+loop. Rough wall-clock, dominated by how much the agents read and how broad the task is:
+
+| Run | Typical |
+| --- | --- |
+| read-only review/plan | **~2–10 min** |
+| `--write` (plan → implement → review) | **~10–25+ min** |
+
+The CLI prints this estimate when it starts and the actual `elapsed` time when it
+finishes. While it runs you'll see a spinner naming the current phase; **long
+pauses on one phase are normal, not a hang** — a single tool-using turn can take
+minutes. Pass `-v`/`-vv` to replace the spinner with per-turn log lines (timings,
+cost, the command run) on stderr. Narrowing the task (`review src/foo.py` rather
+than `review this repo`) is the biggest lever on how long it takes.
 
 ### How a task is approached
 
