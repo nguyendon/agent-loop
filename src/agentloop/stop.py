@@ -29,10 +29,14 @@ class MaxRounds:
 
 @dataclass(slots=True)
 class Consensus:
-    """Stop when the last turn from every agent contains ``marker``.
+    """Stop when every agent's last turn *begins with* ``marker``.
 
     Useful for debates: the loop ends only once *all* participants have signalled
     agreement on their most recent turn, not just the latest speaker.
+
+    The marker must be a leading token, matching the policy instruction to
+    "begin your reply with AGREED". A substring check would be fooled by a
+    negation like "Not quite AGREED..." -- which means the opposite.
     """
 
     marker: str = "AGREED"
@@ -41,7 +45,7 @@ class Consensus:
         marker = self.marker.lower()
         for agent in ctx.agents:
             last = next((m for m in reversed(ctx.transcript.by(agent.name))), None)
-            if last is None or marker not in last.content.lower():
+            if last is None or not last.content.strip().lower().startswith(marker):
                 return False
         return True
 

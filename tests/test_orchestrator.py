@@ -63,6 +63,32 @@ def test_consensus_stops_when_all_agents_agree() -> None:
     assert result.stopped_by == "Consensus"
 
 
+def test_consensus_requires_marker_as_leading_token() -> None:
+    # "Not quite AGREED" means the opposite -- a substring check would stop the
+    # loop here at turn 2; a leading-token check must not.
+    a = FakeAgent("a", ["Not quite AGREED, one issue remains", "AGREED"])
+    b = FakeAgent("b", ["AGREED", "AGREED"])
+    loop = Orchestrator([a, b], DebatePolicy("x"), stop=[Consensus()], max_rounds=10)
+
+    result = loop.run()
+
+    assert result.turns == 3  # not 2: the negated turn didn't count as agreement
+    assert result.stopped_by == "Consensus"
+
+
+def test_real_consensus_wins_label_over_max_rounds_on_tie() -> None:
+    # Consensus is reached exactly as the round cap is hit; the meaningful
+    # condition should win the label, not the backstop.
+    a = FakeAgent("a", ["AGREED"])
+    b = FakeAgent("b", ["AGREED"])
+    loop = Orchestrator([a, b], DebatePolicy("x"), stop=[Consensus()], max_rounds=2)
+
+    result = loop.run()
+
+    assert result.turns == 2
+    assert result.stopped_by == "Consensus"
+
+
 def test_max_rounds_is_a_backstop() -> None:
     a = FakeAgent("a", ["never agree"])
     b = FakeAgent("b", ["also never"])

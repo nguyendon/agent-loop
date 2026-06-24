@@ -44,10 +44,11 @@ class Orchestrator:
             raise ValueError("need at least one agent")
         self.agents = agents
         self.policy = policy
-        # A hard turn cap is always present as a backstop against runaway loops.
-        # MaxRounds counts *total* turns in the transcript, so on resume it caps
-        # the combined length of the original and continued runs.
-        self.stop: list[StopCondition] = [MaxRounds(max_rounds), *(stop or [])]
+        # User stops are checked first so a meaningful exit (e.g. Consensus) wins
+        # the label when it and the backstop fire on the same turn. MaxRounds is
+        # the last-resort cap; it counts *total* transcript turns, so on resume
+        # it bounds the combined length of the original and continued runs.
+        self.stop: list[StopCondition] = [*(stop or []), MaxRounds(max_rounds)]
         self.on_message = on_message
         self.store = store
 
