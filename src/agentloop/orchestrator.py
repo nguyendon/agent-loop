@@ -11,6 +11,7 @@ session pointer, so the loop picks up exactly where it left off.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -19,6 +20,8 @@ from .domain import USER, Message, Transcript
 from .policy import Context, Policy
 from .stop import MaxRounds, StopCondition
 from .store import RestoreState, Store
+
+log = logging.getLogger("agentloop.orchestrator")
 
 
 @dataclass(slots=True)
@@ -38,6 +41,7 @@ class Orchestrator:
         stop: Sequence[StopCondition] | None = None,
         max_rounds: int = 12,
         on_message: Callable[[Message], None] | None = None,
+        on_turn_start: Callable[[Agent, int], None] | None = None,
         store: Store | None = None,
     ) -> None:
         if not agents:
@@ -50,12 +54,21 @@ class Orchestrator:
         # it bounds the combined length of the original and continued runs.
         self.stop: list[StopCondition] = [*(stop or []), MaxRounds(max_rounds)]
         self.on_message = on_message
+        # Fired right before an agent's (blocking) turn -- lets a UI show that
+        # work is happening during the long silent wait for the subprocess.
+        self.on_turn_start = on_turn_start
         self.store = store
 
     def run(self) -> LoopResult:
         transcript, resumed = self._start()
 
         turn = len(transcript.agent_messages)
+        log.info(
+            "%s loop: %s, max %d turns",
+            "resuming" if resumed else "starting",
+            " vs ".join(a.name for a in self.agents),
+            self.stop[-1].n if isinstance(self.stop[-1], MaxRounds) else turn,
+        )
         stopped_by = "no_speaker"
         while True:
             ctx = Context(transcript, self.agents, turn)
@@ -73,6 +86,9 @@ class Orchestrator:
                 break
 
             prompt = self.policy.compose(speaker, ctx)
+            log.info("turn %d → %s", turn + 1, speaker.name)
+            if self.on_turn_start is not None:
+                self.on_turn_start(speaker, turn)
             result = speaker.send(prompt)
             message = transcript.add(
                 Message(
@@ -94,6 +110,9 @@ class Orchestrator:
 
             turn += 1
 
+        log.info(
+            "stopped by %s after %d turns ($%.4f)", stopped_by, turn, transcript.total_cost_usd
+        )
         return LoopResult(transcript=transcript, turns=turn, stopped_by=stopped_by, resumed=resumed)
 
     # --- startup: fresh seed or restore from the journal ---------------------

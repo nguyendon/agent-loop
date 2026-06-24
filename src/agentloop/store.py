@@ -11,11 +11,14 @@ resumed loop continues with the same transcript and the same live sessions.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from .domain import USER, Message, Transcript
+
+log = logging.getLogger("agentloop.store")
 
 
 @dataclass(slots=True)
@@ -104,4 +107,5 @@ class JournalStore:
                             session_id=record.get("session_id"),
                             turns=record.get("turns", 0),
                         )
+        log.info("restored %d turns from %s", len(transcript.agent_messages), self.path)
         return RestoreState(transcript=transcript, agents=agents)

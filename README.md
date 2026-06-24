@@ -46,7 +46,14 @@ uv run agentloop "Design a token-bucket rate limiter" --no-tools
 # Persist a run, then resume it by reusing the same journal path:
 uv run agentloop "review the changes" --rounds 2 --journal run.jsonl
 uv run agentloop "review the changes" --rounds 6 --journal run.jsonl
+
+# See progress: a turn blocks for minutes, so -v logs each turn to stderr:
+uv run agentloop "review the changes" -v        # -v info, -vv debug
 ```
+
+A turn runs an agent subprocess to completion (often minutes with tools), so the
+CLI shows a spinner while it waits. Pass `-v`/`-vv` to replace the spinner with
+per-turn log lines (timings, cost, the command run) on stderr.
 
 By default the agents have **read-only** tool access (claude in plan mode, codex
 in its read-only sandbox), so they ground findings in the real code and history.

@@ -8,11 +8,15 @@ the next turn resumes the same conversation instead of starting cold.
 
 from __future__ import annotations
 
+import logging
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .domain import TurnResult
+
+log = logging.getLogger("agentloop.agent")
 
 
 class AgentError(RuntimeError):
@@ -85,6 +89,10 @@ class CliAgent(Agent):
     def send(self, prompt: str) -> TurnResult:
         first_turn = self.is_first_turn
         command = self._build_command(prompt, first_turn=first_turn)
+        # The prompt is the last arg and can be huge; log the rest plus its size.
+        log.debug("%s: exec %s (prompt %d chars)", self.name, command[:-1], len(prompt))
+
+        start = time.monotonic()
         try:
             proc = subprocess.run(
                 command,
@@ -97,6 +105,7 @@ class CliAgent(Agent):
             )
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{self.name}: timed out after {self.timeout}s") from exc
+        elapsed = time.monotonic() - start
 
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
@@ -106,4 +115,6 @@ class CliAgent(Agent):
         if result.session_id:
             self.session_id = result.session_id
         self.turns += 1
+        cost = f", ${result.cost_usd:.4f}" if result.cost_usd else ""
+        log.info("%s: turn done in %.1fs (%d chars%s)", self.name, elapsed, len(result.text), cost)
         return result
