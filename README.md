@@ -76,6 +76,12 @@ uv run agentloop "fix the failing test in tests/test_orchestrator.py" --write
 uv run agentloop "address the issues in PR #42 and verify the suite still passes" --write
 ```
 
+**Committing is left outside the loop, on purpose.** `--write` edits your working
+tree but never commits — the engine stays out of git. Review the diff and commit
+it yourself, or hand the finished run (the `report:` path printed on `done`) to a
+follow-up agent to turn into clean commits. Keeping it uncommitted is also why the
+reviewers can read the live `git diff`.
+
 ### Review first, then hand off to the fix loop (staged)
 
 The careful path — you see the plan before anything writes:

@@ -254,6 +254,15 @@ def _run_loop(
         )
     )
 
+    # The fix loop edits the tree but deliberately never commits -- committing is
+    # left outside the loop, to a human or to a follow-up agent handed this run.
+    if fix is not None:
+        console.print(
+            f"[dim]changes are left uncommitted by design. review and commit them yourself, "
+            f"or hand this run to an agent: “make clean commits for the changes from "
+            f"{run_dir}”.[/dim]"
+        )
+
 
 @app.command()
 def run(
