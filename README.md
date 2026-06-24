@@ -28,32 +28,62 @@ uv sync
 
 Requires the `claude` and `codex` CLIs installed and logged in.
 
-## Use it
+## Quick start
 
-The loop is task-agnostic. One command: hand the two agents a freeform prompt and
-they do the work with their own tools (git, file reads, `gh`, …) — describe the
-task and they inspect the repo, fetch the PR, or just reason it out.
+The loop is task-agnostic: the task is just a prompt, and the agents use their own
+tools (`git`, `gh`, file reads) to fetch the PR or read the diff. It is **read-only
+by default** — it reviews and converges on a plan, and never touches your tree.
+`--write` is the only thing that can change the repo.
+
+### Review a PR or codebase (read-only)
 
 ```bash
-# Any task — the agents inspect the repo / fetch the PR / etc. themselves:
-uv run agentloop "review the uncommitted changes and agree on the top issues"
-uv run agentloop "review PR #42"
-uv run agentloop "find and fix the flaky test in tests/"
+# A specific PR — the agents fetch the diff themselves with gh
+uv run agentloop "review PR #42: fetch it with gh, find correctness, security, and perf issues, and agree on the top ones"
 
-# Drop claude's plan-mode tools for pure-reasoning tasks (cheaper, faster):
-uv run agentloop "Design a token-bucket rate limiter" --no-tools
+# Your uncommitted / staged work
+uv run agentloop "review the uncommitted changes (git diff) and agree on the prioritized issues"
 
-# Persist a run, then resume it by reusing the same journal path:
-uv run agentloop "review the changes" --rounds 2 --journal run.jsonl
-uv run agentloop "review the changes" --rounds 6 --journal run.jsonl
+# This branch vs main
+uv run agentloop "review the diff between this branch and main; agree on what must change before merge"
 
-# See progress: a turn blocks for minutes, so -v logs each turn to stderr:
-uv run agentloop "review the changes" -v        # -v info, -vv debug
+# A slice of the codebase (a standing audit, no diff)
+uv run agentloop "audit src/agentloop/adapters for correctness and error handling; agree on the top findings"
 ```
 
+Each run writes `out/<timestamp>-<slug>/` with `report.md`, `plan.md`, and the full
+debate. Nothing in your tree is modified.
+
+### Review *and* implement the fix (`--write`)
+
+Same prompts, plus `--write`: it reviews to an agreed plan, then crosses the gate —
+a write-capable agent implements the plan and self-verifies (runs the tests/build),
+and the two agents review the resulting diff until they converge on `APPROVED`.
+
+```bash
+uv run agentloop "fix the failing test in tests/test_orchestrator.py" --write
+uv run agentloop "address the issues in PR #42 and verify the suite still passes" --write
+```
+
+### Review first, then hand off to the fix loop (staged)
+
+The careful path — you see the plan before anything writes:
+
+```bash
+# 1. read-only review → produces the plan
+uv run agentloop "review the uncommitted changes and agree on the fixes"
+#    → done panel prints e.g.  report: out/20260624-143005-review-the-uncommitted-changes
+
+# 2. read out/<run>/plan.md and decide it's right
+
+# 3. hand that exact plan to the fix loop — no re-debate
+uv run agentloop --resume out/20260624-143005-review-the-uncommitted-changes --write
+```
+
+The whole surface is `task` + `--write` + `--resume <run-dir>` + `--repo` + `-v`.
 A turn runs an agent subprocess to completion (often minutes with tools), so the
-CLI shows a spinner while it waits. Pass `-v`/`-vv` to replace the spinner with
-per-turn log lines (timings, cost, the command run) on stderr.
+CLI shows a spinner; pass `-v`/`-vv` to replace it with per-turn log lines (timings,
+cost, the command run) on stderr.
 
 ### How a task is approached
 
@@ -62,19 +92,15 @@ A cheap **triage** turn decides the shape:
 - **Simple question** → straight to debate (two agents open in parallel, then
   argue to consensus).
 - **Open-ended task** (code review, audit, design) → **discovery** first: triage
-  picks independent angles and fans out up to `--num-agents` scouts (default 4)
-  in parallel, pools their findings, then seeds the debate with them.
+  picks independent angles and fans out parallel scouts, pools their findings, then
+  seeds the debate with them.
 
-`--no-triage` forces straight-to-debate; `--num-agents N` caps the scout count.
-The final panel reports the shape that was used (`N scouts → debate` or `debate
-only`) and the total cost across all phases.
-
-By default the agents have **read-only** tool access (claude in plan mode, codex
-in its read-only sandbox), so they ground findings in the real code and history.
-`--no-tools` drops claude out of plan mode for pure-reasoning tasks — cheaper and
-faster. It only affects claude: codex always runs in its read-only sandbox (its
-floor — `codex exec` has no prompt-only mode), so it can still read the repo.
-Treat `--no-tools` as a cost/speed lever, not a hard sandbox guarantee.
+The agents have **read-only** tool access for review (claude in plan mode, codex in
+its read-only sandbox), so they ground findings in the real code and history. Only
+`--write` lifts that, and only past the agreed plan: a single write-capable agent
+(codex `workspace-write`) makes the edits while the reviewers stay read-only. The
+final panel reports the shape used (`N scouts → debate`, `… → fix`) and the total
+cost across all phases.
 
 ## Run it on another repo
 
@@ -121,10 +147,11 @@ Agents **don't share memory** — they never read each other's Layer-3 history.
 Information crosses between them only as text: one agent's turn is recorded in
 the transcript, and `Policy.compose()` quotes it into the next agent's prompt.
 
-Pass a `JournalStore` (or `--journal PATH`) to make a run **durable and
-resumable**. Every turn is appended to a JSONL file as it happens, so a crash
-loses at most the in-flight turn. Reusing the same path replays the journal:
-it rebuilds the transcript *and* restores each agent's `session_id`, so the CLIs
+Every run is **durable and resumable**. The CLI journals automatically to
+`out/<run>/journal.jsonl`; the library takes a `JournalStore` explicitly. Every
+turn is appended as it happens, so a crash loses at most the in-flight turn.
+Replaying the journal (`--resume out/<run>`, or reusing the same path in code)
+rebuilds the transcript *and* restores each agent's `session_id`, so the CLIs
 reload their real Layer-3 context and the loop continues exactly where it
 stopped — not from a cold start.
 
