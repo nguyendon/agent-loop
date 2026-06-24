@@ -1,21 +1,20 @@
-"""Human-readable run reports written to ``out/<timestamp>-<slug>/``.
+"""Human-readable run reports written into a run directory.
 
 Distinct from the journal (``store.py``): the journal is a replay log keyed to
 agent sessions, for resuming a run. A report is the *finished product* -- the
-converged answer plus the supporting material a person reads afterwards.
+agreed plan, what (if anything) was implemented, and the review verdict.
 
 Layout per run::
 
-    out/                                  (gitignored)
-      20260624-143005-<slug>/
-        report.md          final positions + run metadata
-        findings/          one file per discovery scout (omitted if none)
-          01-<focus>.md
-        transcript/
-          debate.md        the full turn-by-turn debate
-
-The slug comes from the triage reason when there is one (a one-line summary of
-how the task was approached), falling back to the task text.
+    out/<timestamp>-<slug>/         (gitignored, created by the CLI up front)
+      report.md          plan + implementation verdict + run metadata
+      plan.md            the agreed plan -- the handoff artifact for --resume --write
+      journal.jsonl      resume journal (written by the store)
+      transcript/
+        debate.md        stage-1 debate (omitted on a resume-handoff)
+        fix.md           stage-2 implement + review (only when --write ran)
+      findings/          one file per discovery scout (omitted if none)
+        01-<focus>.md
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .domain import USER, Message, Transcript
+from .pipeline import FixResult
 
 _SLUG_MAX = 60
 
@@ -35,17 +35,8 @@ def slug(text: str) -> str:
     return cleaned[:_SLUG_MAX].strip("-") or "run"
 
 
-def _final_positions(transcript: Transcript) -> list[Message]:
-    """Each debater's last word, in the order they last spoke.
-
-    On a debate that ends in consensus the very last turn may be a bare
-    "AGREED", so the converged answer lives in the closing turn from *each*
-    side, not just the final speaker -- show both.
-    """
-    last_by_author: dict[str, Message] = {}
-    for message in transcript.agent_messages:
-        last_by_author[message.author] = message
-    return list(last_by_author.values())
+def _last_by_author(transcript: Transcript, author: str) -> Message | None:
+    return next((m for m in reversed(transcript.messages) if m.author == author), None)
 
 
 def _render_report(
@@ -58,7 +49,8 @@ def _render_report(
     turns: int,
     resumed: bool,
     total_cost: float,
-    transcript: Transcript,
+    plan_text: str,
+    fix: FixResult | None,
 ) -> str:
     lines = [
         f"# {slug(triage_reason or task).replace('-', ' ')}",
@@ -74,16 +66,29 @@ def _render_report(
         f"- **turns:** {turns}{' (resumed)' if resumed else ''}",
         f"- **total cost:** ${total_cost:.4f}",
         "",
-        "## Final positions",
+        "## Plan",
+        "",
+        plan_text.strip() or "_(no plan produced)_",
         "",
     ]
-    for message in _final_positions(transcript):
-        lines += [f"### {message.author}", "", message.content.strip(), ""]
+    if fix is not None:
+        verdict = "APPROVED" if fix.approved else "NOT approved"
+        lines += [
+            "## Implementation",
+            "",
+            f"**verdict:** {verdict} after {fix.attempts} attempt(s)",
+            "",
+        ]
+        change = _last_by_author(fix.transcript, "implementer")
+        if change is not None:
+            lines += [change.content.strip(), ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_debate(task: str, transcript: Transcript) -> str:
-    lines = ["# Debate transcript", "", "## task (seed)", "", task.strip(), ""]
+def _render_turns(title: str, transcript: Transcript, *, seed: str | None = None) -> str:
+    lines = [f"# {title}", ""]
+    if seed is not None:
+        lines += ["## task (seed)", "", seed.strip(), ""]
     for message in transcript.messages:
         if message.author == USER:
             continue
@@ -93,45 +98,57 @@ def _render_debate(task: str, transcript: Transcript) -> str:
 
 
 def write_run_report(
+    run_dir: Path,
     *,
-    out_root: Path,
-    timestamp: str,
     task: str,
+    when: str,
     shape: str,
     triage_reason: str,
     stopped_by: str,
     turns: int,
     resumed: bool,
     total_cost: float,
-    transcript: Transcript,
+    plan_text: str,
+    transcript: Transcript | None = None,
     scouts: Sequence[Message] = (),
     focuses: Sequence[str] = (),
+    fix: FixResult | None = None,
 ) -> Path:
-    """Write a run's report tree under ``out_root`` and return the run directory.
+    """Write a run's report tree into ``run_dir`` (already created) and return it.
 
-    ``scouts`` are the discovery turns (absent from the debate transcript, which
-    only holds the seed and the debaters); ``focuses`` labels them positionally.
+    ``transcript`` is the stage-1 debate (absent on a resume-handoff, where stage
+    1 ran in a prior process). ``scouts`` are the discovery turns -- they never
+    join the debate transcript -- and ``focuses`` labels them positionally.
     """
-    run_dir = out_root / f"{timestamp}-{slug(triage_reason or task)}"
     (run_dir / "transcript").mkdir(parents=True, exist_ok=True)
 
     (run_dir / "report.md").write_text(
         _render_report(
             task=task,
-            when=timestamp,
+            when=when,
             shape=shape,
             triage_reason=triage_reason,
             stopped_by=stopped_by,
             turns=turns,
             resumed=resumed,
             total_cost=total_cost,
-            transcript=transcript,
+            plan_text=plan_text,
+            fix=fix,
         ),
         encoding="utf-8",
     )
-    (run_dir / "transcript" / "debate.md").write_text(
-        _render_debate(task, transcript), encoding="utf-8"
+    (run_dir / "plan.md").write_text(
+        f"# Plan\n\n_for: {task}_\n\n{plan_text.strip()}\n", encoding="utf-8"
     )
+
+    if transcript is not None:
+        (run_dir / "transcript" / "debate.md").write_text(
+            _render_turns("Debate transcript", transcript, seed=task), encoding="utf-8"
+        )
+    if fix is not None:
+        (run_dir / "transcript" / "fix.md").write_text(
+            _render_turns("Fix transcript (implement + review)", fix.transcript), encoding="utf-8"
+        )
 
     if scouts:
         findings = run_dir / "findings"

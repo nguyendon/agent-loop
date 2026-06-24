@@ -37,12 +37,36 @@ Orchestrator ── select speaker → compose prompt → agent.send → record 
 - `src/agentloop/adapters/` — one module per CLI; parses that CLI's real output.
 - `src/agentloop/policy.py` / `stop.py` / `orchestrator.py` — the loop.
 - `src/agentloop/store.py` — resumable journal.
-- `src/agentloop/report.py` — human-readable run report (final answer +
-  transcript/findings) written to `out/<timestamp>-<slug>/`. Distinct from the
+- `src/agentloop/report.py` — human-readable run report (plan + implementation
+  verdict + transcript/findings) written into the run dir. Distinct from the
   journal: the journal resumes a run, the report is the finished product.
-- `src/agentloop/pipeline.py` — adaptive flow: triage → (optional) parallel
-  discovery scouts → serial debate. `solve()` is the entry point.
+- `src/agentloop/pipeline.py` — adaptive flow with a write-gate: triage →
+  (optional) parallel discovery scouts → serial debate → **agreed plan** →
+  `[--write]` → fix loop (implement → self-verify → review diff → APPROVED).
+  `solve()` is the entry point; `fix()` is the stage-2 loop.
 - `src/agentloop/cli.py` — `run` (a single freeform-task command).
+
+### Pipeline & CLI surface
+
+```
+triage → discovery → debate ──► AGREED PLAN ──[gate]──► implement → self-verify → review ──► APPROVED
+        (read-only, always)      (plan.md)      │                                  ↑ loop until APPROVED / max attempts
+                                                ├─ default:           stop, save the plan (read-only)
+                                                ├─ --write:           cross now (one-shot)
+                                                └─ --resume + --write: cross later (review-first handoff)
+```
+
+Read-only is the safe default; writing the repo is **always** an explicit
+`--write` opt-in, never inferred from the prompt. The only writer is a single
+`Build.implementer()` (codex `workspace-write`) past the gate — one writer, so no
+worktree/concurrency hazard; reviewers stay read-only and inspect the diff via
+`git diff`. The whole CLI is `task` + `--write` + `--resume <run-dir>` + `--repo`
++ `-v`; everything else (discovery breadth, rounds, budget backstop, journaling,
+the `out/` report dir) is a default or triage-inferred, not a flag.
+
+Each run writes `out/<timestamp>-<slug>/`: `report.md`, `plan.md` (the handoff
+artifact), `journal.jsonl` (resume), `meta.json` (task), `transcript/debate.md`
++ `transcript/fix.md`, and `findings/`.
 
 The CLI is intentionally thin: it hands the agents a prompt and lets them do the
 work with their own tools. Task-specific logic (e.g. fetching a diff) belongs in

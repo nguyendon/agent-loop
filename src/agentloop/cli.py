@@ -1,16 +1,19 @@
 """Command-line entry point.
 
-The loop is task-agnostic: it hands the two agents a freeform prompt and lets
-them do the work with their own tools (git, file reads, gh, …). A single command,
-so Typer promotes it -- invoke it as `agentloop "<task>"`, no subcommand.
+The loop is task-agnostic: it hands the agents a freeform prompt and lets them
+do the work with their own tools (git, file reads, gh, …). A single command, so
+Typer promotes it -- invoke it as `agentloop "<task>"`, no subcommand.
+
+Read-only by default; writing to the repo is always an explicit opt-in:
 
     uv run agentloop "review the uncommitted changes and agree on the top issues"
-    uv run agentloop "review PR #42"
-    uv run agentloop "design a token-bucket rate limiter" --no-tools
+    uv run agentloop "fix the flaky test in test_orchestrator.py" --write
+    uv run agentloop --resume out/20260624-120000-fix-the-flaky-test --write
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from datetime import datetime
@@ -26,14 +29,25 @@ from rich.status import Status
 from .agent import Agent
 from .domain import Message
 from .pipeline import Build, solve
-from .report import write_run_report
+from .report import slug, write_run_report
 from .stop import BudgetUSD, Consensus, StopCondition
 from .store import JournalStore
 
 app = typer.Typer(add_completion=False, help="Run a multi-agent loop over the claude & codex CLIs.")
 console = Console()
 
-_STYLES = {"claude": "bold magenta", "codex": "bold cyan", "user": "dim"}
+_STYLES = {
+    "claude": "bold magenta",
+    "codex": "bold cyan",
+    "reviewer-claude": "bold magenta",
+    "reviewer-codex": "bold cyan",
+    "implementer": "bold green",
+    "user": "dim",
+}
+
+_ROUNDS = 8  # max debate turns
+_NUM_AGENTS = 4  # max discovery scouts (triage picks 2..N)
+_BUDGET_USD = 10.0  # runaway-cost backstop (no flag; tunable here)
 
 
 def _setup_logging(verbosity: int) -> None:
@@ -55,40 +69,60 @@ def _print_message(message: Message) -> None:
     console.print()
 
 
-def _check_repo(repo: str | None) -> None:
-    if repo is not None and not Path(repo).is_dir():
-        console.print(f"[red]--repo path is not a directory: {repo}[/red]")
-        raise typer.Exit(2)
+def _write_meta(run_dir: Path, task: str, when: str) -> None:
+    (run_dir / "meta.json").write_text(json.dumps({"task": task, "when": when}), encoding="utf-8")
+
+
+def _read_meta(run_dir: Path) -> dict[str, str]:
+    path = run_dir / "meta.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _read_plan(run_dir: Path) -> str | None:
+    """The agreed plan body from a prior run's plan.md (header stripped)."""
+    path = run_dir / "plan.md"
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("_for:")), 0)
+    return "\n".join(lines[start:]).strip() or None
 
 
 def _run_loop(
-    task: str,
-    *,
-    rounds: int,
-    budget: float | None,
-    journal: str | None,
-    repo: str | None,
-    tools: bool,
-    num_agents: int,
-    triage: bool,
-    out_dir: str | None,
-    verbose: int,
+    task: str | None, *, write: bool, resume: str | None, repo: str | None, verbose: int
 ) -> None:
-    stop: list[StopCondition] = [Consensus("AGREED")]
-    if budget:
-        stop.append(BudgetUSD(budget))
+    # --- resolve the run directory, task, and any prior agreed plan ----------
+    resumed_plan: str | None = None
+    if resume is not None:
+        run_dir = Path(resume)
+        if not run_dir.is_dir():
+            console.print(f"[red]--resume path is not a directory: {resume}[/red]")
+            raise typer.Exit(2)
+        meta = _read_meta(run_dir)
+        task = task or meta.get("task")
+        when = meta.get("when", "")
+        # A finished stage 1 leaves plan.md; with --write that's the handoff.
+        # Otherwise we fall through and resume the stage-1 debate from the journal.
+        resumed_plan = _read_plan(run_dir) if write else None
+        console.print(f"[dim]resuming {run_dir}[/dim]\n")
+    else:
+        when = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_dir = Path("out") / f"{when}-{slug(task or '')}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Scouts surface only through on_message (they never join the debate
-    # transcript), so capture them here for the report's findings/ subdir.
+    if not task:
+        console.print("[red]no task: pass one, or --resume a run dir that has meta.json[/red]")
+        raise typer.Exit(2)
+    if resume is None:
+        _write_meta(run_dir, task, when)
+
+    store = JournalStore(run_dir / "journal.jsonl")
+    stop: list[StopCondition] = [Consensus("AGREED"), BudgetUSD(_BUDGET_USD)]
     scouts: list[Message] = []
 
-    store = JournalStore(journal) if journal else None
-    if store and store.exists():
-        console.print(f"[dim]resuming from {journal}[/dim]\n")
-
-    # A turn blocks while the agent's subprocess runs (often minutes with tools),
-    # so without feedback it looks frozen. Show a spinner -- except when logging is
-    # on, where the log lines are the play-by-play instead.
+    # A turn blocks while the agent's subprocess runs (often minutes), so without
+    # feedback it looks frozen. Show a spinner -- except when logging is on, where
+    # the log lines are the play-by-play instead.
     spinner_on = verbose <= 0
     spinner: Status | None = None
 
@@ -118,19 +152,18 @@ def _run_loop(
             scouts.append(message)
         _print_message(message)
 
-    console.print(
-        f"[dim]claude ⇄ codex · up to {rounds} turns · "
-        f"{'tools' if tools else 'no tools'} · ctrl-c to stop[/dim]\n"
-    )
+    mode = "write" if write else "read-only"
+    console.print(f"[dim]claude ⇄ codex · {mode} · up to {_ROUNDS} turns · ctrl-c to stop[/dim]\n")
 
     try:
         outcome = solve(
             task,
-            build=Build(repo=repo, tools=tools),
-            rounds=rounds,
+            build=Build(repo=repo),
+            rounds=_ROUNDS,
             stop=stop,
-            num_agents=num_agents,
-            triage=triage,
+            num_agents=_NUM_AGENTS,
+            write=write,
+            resumed_plan=resumed_plan,
             store=store,
             on_status=_on_status,
             on_message=_on_message,
@@ -144,36 +177,56 @@ def _run_loop(
     finally:
         _set_spinner(None)
 
-    result = outcome.loop
-    total = result.transcript.total_cost_usd + outcome.extra_cost_usd
     plan = outcome.plan
-    shape = f"{len(plan.focuses)} scouts → debate" if plan.discovery else "debate only"
+    loop = outcome.loop
+    fix = outcome.fix
+    total = (loop.transcript.total_cost_usd if loop else 0.0) + outcome.extra_cost_usd
 
-    report_dir: Path | None = None
-    if out_dir is not None:
-        report_dir = write_run_report(
-            out_root=Path(out_dir),
-            timestamp=datetime.now().strftime("%Y%m%d-%H%M%S"),
-            task=task,
-            shape=shape,
-            triage_reason=plan.reason,
-            stopped_by=result.stopped_by,
-            turns=result.turns,
-            resumed=result.resumed,
-            total_cost=total,
-            transcript=result.transcript,
-            scouts=scouts,
-            focuses=plan.focuses,
+    if resumed_plan is not None:
+        base_shape = "resumed plan"
+    elif plan.discovery:
+        base_shape = f"{len(plan.focuses)} scouts → debate"
+    else:
+        base_shape = "debate only"
+    shape = base_shape + (" → fix" if fix is not None else "")
+
+    if fix is not None:
+        stopped_by = "APPROVED" if fix.approved else "fix incomplete"
+        turns = fix.attempts
+    elif loop is not None:
+        stopped_by, turns = loop.stopped_by, loop.turns
+    else:
+        stopped_by, turns = "n/a", 0
+
+    write_run_report(
+        run_dir,
+        task=task,
+        when=when or run_dir.name,
+        shape=shape,
+        triage_reason=plan.reason,
+        stopped_by=stopped_by,
+        turns=turns,
+        resumed=resume is not None,
+        total_cost=total,
+        plan_text=outcome.plan_text,
+        transcript=loop.transcript if loop else None,
+        scouts=scouts,
+        focuses=plan.focuses,
+        fix=fix,
+    )
+
+    verdict = ""
+    if fix is not None:
+        verdict = (
+            f"\nverdict: [bold]{'APPROVED' if fix.approved else 'changes still needed'}[/bold]"
         )
-
     console.print(
         Panel(
             f"shape: [bold]{shape}[/bold]\n"
-            f"stopped by: [bold]{result.stopped_by}[/bold]\n"
-            f"turns: {result.turns}{' (resumed)' if result.resumed else ''}\n"
-            f"total cost: ${total:.4f}"
-            + (f"\njournal: {journal}" if journal else "")
-            + (f"\nreport: {report_dir}" if report_dir else ""),
+            f"stopped by: [bold]{stopped_by}[/bold]\n"
+            f"turns: {turns}{verdict}\n"
+            f"total cost: ${total:.4f}\n"
+            f"report: {run_dir}",
             title="done",
         )
     )
@@ -181,53 +234,28 @@ def _run_loop(
 
 @app.command()
 def run(
-    task: str = typer.Argument(..., help="What you want the two agents to do."),
-    rounds: int = typer.Option(8, help="Max agent turns before stopping."),
-    budget: float | None = typer.Option(None, help="Stop once total cost (USD) exceeds this."),
+    task: str | None = typer.Argument(None, help="What you want the agents to do."),
+    write: bool = typer.Option(
+        False, "--write", help="Allow the agents to modify the repo: plan → implement → review."
+    ),
+    resume: str | None = typer.Option(
+        None,
+        "--resume",
+        help="Continue a prior run directory (e.g. out/<run>); add --write to fix.",
+    ),
     repo: str | None = typer.Option(
-        None, help="Directory to run the agents in (defaults to the current directory)."
-    ),
-    journal: str | None = typer.Option(
-        None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
-    ),
-    no_tools: bool = typer.Option(
-        False,
-        "--no-tools",
-        help="Drop claude's plan-mode tools (pure reasoning). codex keeps its read-only sandbox.",
-    ),
-    num_agents: int = typer.Option(
-        4, "--num-agents", help="Max parallel discovery scouts when triage calls for it."
-    ),
-    no_triage: bool = typer.Option(
-        False, "--no-triage", help="Skip triage and go straight to debate (no discovery)."
-    ),
-    out_dir: str = typer.Option(
-        "out",
-        "--out-dir",
-        help="Root for timestamped run reports (report.md + transcript/findings).",
-    ),
-    no_report: bool = typer.Option(
-        False, "--no-report", help="Don't write a run report to --out-dir."
+        None, "--repo", help="Directory to run the agents in (defaults to the current directory)."
     ),
     verbose: int = typer.Option(
         0, "--verbose", "-v", count=True, help="Log progress to stderr (-v info, -vv debug)."
     ),
 ) -> None:
-    """Run the two-agent loop on any task; triage picks discovery depth, then debate."""
-    _check_repo(repo)
+    """Triage → discovery → debate to an agreed plan; --write crosses the gate into the fix loop."""
+    if repo is not None and not Path(repo).is_dir():
+        console.print(f"[red]--repo path is not a directory: {repo}[/red]")
+        raise typer.Exit(2)
     _setup_logging(verbose)
-    _run_loop(
-        task,
-        rounds=rounds,
-        budget=budget,
-        journal=journal,
-        repo=repo,
-        tools=not no_tools,
-        num_agents=num_agents,
-        triage=not no_triage,
-        out_dir=None if no_report else out_dir,
-        verbose=verbose,
-    )
+    _run_loop(task, write=write, resume=resume, repo=repo, verbose=verbose)
 
 
 if __name__ == "__main__":
