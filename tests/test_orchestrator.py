@@ -172,3 +172,27 @@ def test_resume_continues_without_reseeding_or_repeating(tmp_path: Path) -> None
     assert sum(1 for m in second.transcript.messages if m.author == "user") == 1
     # Restored agents resumed their sessions rather than treating turn 1 as fresh.
     assert a2.turns == 2  # 1 restored + 1 taken this run
+
+
+def test_parse_plan_extracts_focuses_and_caps() -> None:
+    from agentloop.pipeline import parse_plan
+
+    raw = '```json\n{"discovery": true, "focuses": ["a","b","c","d","e"], "reason": "big"}\n```'
+    plan = parse_plan(raw, max_agents=3)
+    assert plan.discovery is True
+    assert plan.focuses == ["a", "b", "c"]  # capped at max_agents
+
+
+def test_parse_plan_simple_question_no_discovery() -> None:
+    from agentloop.pipeline import parse_plan
+
+    plan = parse_plan('{"discovery": false, "focuses": [], "reason": "simple"}', max_agents=4)
+    assert plan.discovery is False
+    assert plan.focuses == []
+
+
+def test_parse_plan_falls_back_on_garbage() -> None:
+    from agentloop.pipeline import parse_plan
+
+    plan = parse_plan("the model rambled with no json", max_agents=4)
+    assert plan.discovery is False  # safe default

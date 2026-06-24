@@ -55,6 +55,20 @@ A turn runs an agent subprocess to completion (often minutes with tools), so the
 CLI shows a spinner while it waits. Pass `-v`/`-vv` to replace the spinner with
 per-turn log lines (timings, cost, the command run) on stderr.
 
+### How a task is approached
+
+A cheap **triage** turn decides the shape:
+
+- **Simple question** → straight to debate (two agents open in parallel, then
+  argue to consensus).
+- **Open-ended task** (code review, audit, design) → **discovery** first: triage
+  picks independent angles and fans out up to `--num-agents` scouts (default 4)
+  in parallel, pools their findings, then seeds the debate with them.
+
+`--no-triage` forces straight-to-debate; `--num-agents N` caps the scout count.
+The final panel reports the shape that was used (`N scouts → debate` or `debate
+only`) and the total cost across all phases.
+
 By default the agents have **read-only** tool access (claude in plan mode, codex
 in its read-only sandbox), so they ground findings in the real code and history.
 `--no-tools` drops claude out of plan mode for pure-reasoning tasks — cheaper and

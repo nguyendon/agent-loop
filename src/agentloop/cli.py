@@ -22,13 +22,10 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.status import Status
 
-from .adapters.claude import ClaudeAgent
-from .adapters.codex import CodexAgent
 from .agent import Agent
 from .domain import Message
-from .orchestrator import Orchestrator
-from .policy import DebatePolicy
-from .stop import BudgetUSD, Consensus
+from .pipeline import Build, solve
+from .stop import BudgetUSD, Consensus, StopCondition
 from .store import JournalStore
 
 app = typer.Typer(add_completion=False, help="Run a multi-agent loop over the claude & codex CLIs.")
@@ -70,17 +67,11 @@ def _run_loop(
     journal: str | None,
     repo: str | None,
     tools: bool,
+    num_agents: int,
+    triage: bool,
     verbose: int,
 ) -> None:
-    # cwd makes the tool location-independent: git and both agents run in the
-    # target repo. With tools, claude gets plan mode (read-only tools, no edits);
-    # without, claude runs in default mode (no plan-mode tools). codex always uses
-    # its read-only sandbox -- exec has no prompt-only mode -- so `tools` is a
-    # claude-only lever, not a hard sandbox guarantee for the pair.
-    claude = ClaudeAgent("claude", cwd=repo, permission_mode="plan" if tools else None)
-    codex = CodexAgent("codex", cwd=repo, sandbox="read-only")
-
-    stop: list[Consensus | BudgetUSD] = [Consensus("AGREED")]
+    stop: list[StopCondition] = [Consensus("AGREED")]
     if budget:
         stop.append(BudgetUSD(budget))
 
@@ -89,35 +80,33 @@ def _run_loop(
         console.print(f"[dim]resuming from {journal}[/dim]\n")
 
     # A turn blocks while the agent's subprocess runs (often minutes with tools),
-    # so without feedback it looks frozen. Show a spinner per turn -- except when
-    # logging is on, where the log lines are the play-by-play instead.
+    # so without feedback it looks frozen. Show a spinner -- except when logging is
+    # on, where the log lines are the play-by-play instead.
     spinner_on = verbose <= 0
     spinner: Status | None = None
 
-    def _stop_spinner() -> None:
+    def _set_spinner(text: str | None) -> None:
         nonlocal spinner
         if spinner is not None:
             spinner.stop()
             spinner = None
+        if text is not None and spinner_on:
+            spinner = console.status(text, spinner="dots")
+            spinner.start()
+
+    def _on_status(text: str) -> None:
+        _set_spinner(f"[dim]{text}[/dim]")
 
     def _on_turn_start(agent: Agent, turn: int) -> None:
-        nonlocal spinner
-        if spinner_on:
-            style = _STYLES.get(agent.name, "white")
-            spinner = console.status(
-                f"[{style}]{agent.name}[/{style}] thinking… (turn {turn + 1})", spinner="dots"
-            )
-            spinner.start()
+        style = _STYLES.get(agent.name, "white")
+        _set_spinner(f"[{style}]{agent.name}[/{style}] thinking… (turn {turn + 1})")
 
     def _on_parallel_start(agents: Sequence[Agent]) -> None:
-        nonlocal spinner
-        if spinner_on:
-            names = ", ".join(a.name for a in agents)
-            spinner = console.status(f"[bold]{names}[/bold] thinking in parallel…", spinner="dots")
-            spinner.start()
+        names = ", ".join(a.name for a in agents)
+        _set_spinner(f"[bold]{names}[/bold] thinking in parallel…")
 
     def _on_message(message: Message) -> None:
-        _stop_spinner()
+        _set_spinner(None)
         _print_message(message)
 
     console.print(
@@ -125,31 +114,37 @@ def _run_loop(
         f"{'tools' if tools else 'no tools'} · ctrl-c to stop[/dim]\n"
     )
 
-    loop = Orchestrator(
-        [claude, codex],
-        DebatePolicy(task),
-        stop=stop,
-        max_rounds=rounds,
-        on_message=_on_message,
-        on_turn_start=_on_turn_start,
-        on_parallel_start=_on_parallel_start,
-        store=store,
-    )
     try:
-        result = loop.run()
+        outcome = solve(
+            task,
+            build=Build(repo=repo, tools=tools),
+            rounds=rounds,
+            stop=stop,
+            num_agents=num_agents,
+            triage=triage,
+            store=store,
+            on_status=_on_status,
+            on_message=_on_message,
+            on_turn_start=_on_turn_start,
+            on_parallel_start=_on_parallel_start,
+        )
     except KeyboardInterrupt:
-        _stop_spinner()
+        _set_spinner(None)
         console.print("\n[yellow]interrupted[/yellow]")
         raise typer.Exit(130) from None
     finally:
-        _stop_spinner()
+        _set_spinner(None)
 
+    result = outcome.loop
+    total = result.transcript.total_cost_usd + outcome.extra_cost_usd
+    plan = outcome.plan
+    shape = f"{len(plan.focuses)} scouts → debate" if plan.discovery else "debate only"
     console.print(
         Panel(
+            f"shape: [bold]{shape}[/bold]\n"
             f"stopped by: [bold]{result.stopped_by}[/bold]\n"
             f"turns: {result.turns}{' (resumed)' if result.resumed else ''}\n"
-            f"total cost: ${result.transcript.total_cost_usd:.4f}"
-            + (f"\njournal: {journal}" if journal else ""),
+            f"total cost: ${total:.4f}" + (f"\njournal: {journal}" if journal else ""),
             title="done",
         )
     )
@@ -171,11 +166,17 @@ def run(
         "--no-tools",
         help="Drop claude's plan-mode tools (pure reasoning). codex keeps its read-only sandbox.",
     ),
+    num_agents: int = typer.Option(
+        4, "--num-agents", help="Max parallel discovery scouts when triage calls for it."
+    ),
+    no_triage: bool = typer.Option(
+        False, "--no-triage", help="Skip triage and go straight to debate (no discovery)."
+    ),
     verbose: int = typer.Option(
         0, "--verbose", "-v", count=True, help="Log progress to stderr (-v info, -vv debug)."
     ),
 ) -> None:
-    """Run the two-agent loop on any task; the agents do the work themselves."""
+    """Run the two-agent loop on any task; triage picks discovery depth, then debate."""
     _check_repo(repo)
     _setup_logging(verbose)
     _run_loop(
@@ -185,6 +186,8 @@ def run(
         journal=journal,
         repo=repo,
         tools=not no_tools,
+        num_agents=num_agents,
+        triage=not no_triage,
         verbose=verbose,
     )
 

@@ -37,6 +37,8 @@ Orchestrator ── select speaker → compose prompt → agent.send → record 
 - `src/agentloop/adapters/` — one module per CLI; parses that CLI's real output.
 - `src/agentloop/policy.py` / `stop.py` / `orchestrator.py` — the loop.
 - `src/agentloop/store.py` — resumable journal.
+- `src/agentloop/pipeline.py` — adaptive flow: triage → (optional) parallel
+  discovery scouts → serial debate. `solve()` is the entry point.
 - `src/agentloop/cli.py` — `run` (a single freeform-task command).
 
 The CLI is intentionally thin: it hands the agents a prompt and lets them do the
