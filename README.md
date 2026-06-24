@@ -40,7 +40,7 @@ uv run agentloop run "review the uncommitted changes and agree on the top issues
 uv run agentloop run "review PR #42"
 uv run agentloop run "find and fix the flaky test in tests/"
 
-# Pure reasoning, no repo access (cheaper, faster):
+# Drop claude's plan-mode tools for pure-reasoning tasks (cheaper, faster):
 uv run agentloop run "Design a token-bucket rate limiter" --no-tools
 
 # Review preset (defaults to the current working changes):
@@ -54,8 +54,10 @@ uv run agentloop run "review the changes" --rounds 6 --journal run.jsonl
 
 By default the agents have **read-only** tool access (claude in plan mode, codex
 in its read-only sandbox), so they ground findings in the real code and history.
-`--no-tools` drops claude to prompt-only for tasks that need no repo access — it's
-cheaper and faster but the agents only see what you put in the prompt.
+`--no-tools` drops claude out of plan mode for pure-reasoning tasks — cheaper and
+faster. It only affects claude: codex always runs in its read-only sandbox (its
+floor — `codex exec` has no prompt-only mode), so it can still read the repo.
+Treat `--no-tools` as a cost/speed lever, not a hard sandbox guarantee.
 
 ## Run it on another repo
 

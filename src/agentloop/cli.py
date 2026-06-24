@@ -75,8 +75,10 @@ def _run_loop(
     tools: bool,
 ) -> None:
     # cwd makes the tool location-independent: git and both agents run in the
-    # target repo. With tools, claude gets plan mode (read-only tools, no edits),
-    # mirroring codex's read-only sandbox; without, claude only sees the prompt.
+    # target repo. With tools, claude gets plan mode (read-only tools, no edits);
+    # without, claude runs in default mode (no plan-mode tools). codex always uses
+    # its read-only sandbox -- exec has no prompt-only mode -- so `tools` is a
+    # claude-only lever, not a hard sandbox guarantee for the pair.
     claude = ClaudeAgent("claude", cwd=repo, permission_mode="plan" if tools else None)
     codex = CodexAgent("codex", cwd=repo, sandbox="read-only")
 
@@ -121,7 +123,9 @@ def run(
         None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
     ),
     no_tools: bool = typer.Option(
-        False, "--no-tools", help="Run claude without file/repo tools (pure reasoning)."
+        False,
+        "--no-tools",
+        help="Drop claude's plan-mode tools (pure reasoning). codex keeps its read-only sandbox.",
     ),
 ) -> None:
     """Run the two-agent loop on any task; the agents do the work themselves."""
@@ -143,7 +147,9 @@ def review(
         None, help="JSONL file to persist/resume the run. Reuse the same path to resume."
     ),
     no_tools: bool = typer.Option(
-        False, "--no-tools", help="Run claude without file/repo tools (pure reasoning)."
+        False,
+        "--no-tools",
+        help="Drop claude's plan-mode tools (pure reasoning). codex keeps its read-only sandbox.",
     ),
 ) -> None:
     """Two agents review code changes and reconcile findings (a preset over `run`)."""
