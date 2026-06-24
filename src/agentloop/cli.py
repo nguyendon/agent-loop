@@ -26,7 +26,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.status import Status
 
-from .agent import Agent
+from .agent import Agent, AgentError
 from .domain import Message
 from .pipeline import Build, solve
 from .report import slug, write_run_report
@@ -174,6 +174,10 @@ def _run_loop(
         _set_spinner(None)
         console.print("\n[yellow]interrupted[/yellow]")
         raise typer.Exit(130) from None
+    except AgentError as exc:
+        _set_spinner(None)
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
     finally:
         _set_spinner(None)
 

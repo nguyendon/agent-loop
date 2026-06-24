@@ -84,6 +84,12 @@ class CliAgent(Agent):
     def _parse(self, stdout: str) -> TurnResult:
         """Turn the process's stdout into a ``TurnResult``."""
 
+    def _failure_detail(self, stdout: str, stderr: str) -> str:
+        """Best error message for a non-zero exit. Some CLIs (codex) report the
+        real cause as a structured event on stdout while stderr is just noise --
+        such adapters override this to dig the message out of stdout."""
+        return (stderr or stdout or "").strip()
+
     # --- driver --------------------------------------------------------------
 
     def send(self, prompt: str) -> TurnResult:
@@ -108,7 +114,7 @@ class CliAgent(Agent):
         elapsed = time.monotonic() - start
 
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
+            detail = self._failure_detail(proc.stdout, proc.stderr)
             raise AgentError(f"{self.name}: exit {proc.returncode}: {detail[:500]}")
 
         result = self._parse(proc.stdout)

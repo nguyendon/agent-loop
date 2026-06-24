@@ -91,7 +91,12 @@ to its real Layer-3 session.
   containers in public signatures (list invariance bites otherwise).
 - Adapters are built against the CLIs' **actual** output — if a CLI's JSON
   changes, re-probe it (`claude -p --output-format json`, `codex exec --json`)
-  rather than guessing the schema.
+  rather than guessing the schema. On failure, surface the CLI's *real* error:
+  `codex exec` exits non-zero but reports the cause as a stdout event (stderr is
+  just stdin noise), so `CodexAgent._failure_detail` digs it out. `solve()`
+  preflights both CLIs first so misconfig (bad model, not logged in) fails in
+  seconds; per-CLI model overrides come from `AGENTLOOP_CODEX_MODEL` /
+  `AGENTLOOP_CLAUDE_MODEL` so the user's global CLI config is untouched.
 - Keep the loop engine task-agnostic: new behavior belongs in a `Policy`,
   `StopCondition`, or `Agent` subclass, not in `Orchestrator`.
 - Commits: small and logical, imperative subject, Conventional-Commit prefix

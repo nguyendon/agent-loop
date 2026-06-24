@@ -67,6 +67,22 @@ class CodexAgent(CliAgent):
         cmd += [prompt]
         return cmd
 
+    def _failure_detail(self, stdout: str, stderr: str) -> str:
+        # codex exec exits non-zero on a failed turn but still emits the real
+        # cause as an {"type": "error"|"turn.failed"} event on stdout; stderr is
+        # just "Reading additional input from stdin...". Prefer the event.
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") in ("error", "turn.failed"):
+                return _error_message(event)
+        return (stderr or stdout or "").strip()
+
     def _parse(self, stdout: str) -> TurnResult:
         session_id: str | None = None
         usage: dict[str, object] | None = None
@@ -96,3 +112,34 @@ class CodexAgent(CliAgent):
             usage=usage,
             raw=stdout,
         )
+
+
+def _error_message(event: dict[str, object]) -> str:
+    """The human-readable message from a codex error/turn.failed event.
+
+    The ``message`` field is often itself a JSON string like
+    ``{"error": {"message": "The 'gpt-5.3-codex' model is not supported..."}}``;
+    unwrap one level to surface just the sentence.
+    """
+    raw = event.get("message")
+    error = event.get("error")
+    if isinstance(error, dict):
+        nested = error.get("message")
+        if isinstance(nested, str):
+            raw = nested
+    if not isinstance(raw, str):
+        return str(event)
+    try:
+        inner = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    if isinstance(inner, dict):
+        nested_error = inner.get("error")
+        if isinstance(nested_error, dict):
+            message = nested_error.get("message")
+            if isinstance(message, str):
+                return message
+        message = inner.get("message")
+        if isinstance(message, str):
+            return message
+    return raw

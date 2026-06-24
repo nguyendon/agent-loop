@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 from .adapters.claude import ClaudeAgent
 from .adapters.codex import CodexAgent
-from .agent import Agent
+from .agent import Agent, AgentError
 from .domain import Message, Transcript
 from .orchestrator import LoopResult, Orchestrator, fan_out
 from .policy import DebatePolicy
@@ -100,19 +102,37 @@ class Build:
     """
 
     repo: str | None = None
+    # Per-CLI model overrides, scoped to agentloop -- set via env so the user's
+    # global codex/claude config is untouched. codex exec's default model isn't
+    # always allowed on every account (e.g. ChatGPT-auth rejects gpt-*-codex),
+    # so this is how you point it at a supported one (e.g. gpt-5.5).
+    claude_model: str | None = field(default_factory=lambda: os.getenv("AGENTLOOP_CLAUDE_MODEL"))
+    codex_model: str | None = field(default_factory=lambda: os.getenv("AGENTLOOP_CODEX_MODEL"))
 
     # Factories return the Agent abstraction (callers never need the concrete
     # CLI type); this also lets tests substitute a Build with fake agents.
     def claude(self, name: str = "claude", system_prompt: str | None = None) -> Agent:
-        return ClaudeAgent(name, cwd=self.repo, permission_mode="plan", system_prompt=system_prompt)
+        return ClaudeAgent(
+            name,
+            model=self.claude_model,
+            cwd=self.repo,
+            permission_mode="plan",
+            system_prompt=system_prompt,
+        )
 
     def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
-        return CodexAgent(name, cwd=self.repo, sandbox="read-only", system_prompt=system_prompt)
+        return CodexAgent(
+            name,
+            model=self.codex_model,
+            cwd=self.repo,
+            sandbox="read-only",
+            system_prompt=system_prompt,
+        )
 
     def implementer(self, name: str = "implementer") -> Agent:
         # codex workspace-write can edit files AND run tests inside its sandbox
         # (no network/escape) -- more contained than claude headless write.
-        return CodexAgent(name, cwd=self.repo, sandbox="workspace-write")
+        return CodexAgent(name, model=self.codex_model, cwd=self.repo, sandbox="workspace-write")
 
     def scout(self, index: int, focus: str) -> Agent:
         # Alternate model families for diversity; the lens comes from the focus.
@@ -186,6 +206,31 @@ def _requested_changes(transcript: Transcript) -> str:
 
 def _noop(*_: object) -> None:
     pass
+
+
+_PREFLIGHT_PROMPT = "Reply with the single word: ok"
+_MODEL_HINT = (
+    "\nIf an agent rejects its model, set AGENTLOOP_CODEX_MODEL / "
+    "AGENTLOOP_CLAUDE_MODEL to one your account supports (e.g. gpt-5.5)."
+)
+
+
+def preflight(build: Build, *, on_status: Callable[[str], None] = _noop) -> None:
+    """Cheap health check before the real work: ping each CLI in parallel and
+    fail fast with the actual error (bad model, not logged in, missing binary)
+    instead of dying minutes later mid-debate."""
+    on_status("checking agents…")
+    # The AgentError already carries the agent's name, so a flat list is enough.
+    agents = [build.claude("preflight"), build.codex("preflight")]
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=len(agents)) as pool:
+        for future in [pool.submit(a.send, _PREFLIGHT_PROMPT) for a in agents]:
+            try:
+                future.result()
+            except AgentError as exc:
+                errors.append(str(exc))
+    if errors:
+        raise AgentError("preflight failed:\n  " + "\n  ".join(errors) + _MODEL_HINT)
 
 
 def fix(
@@ -264,6 +309,8 @@ def solve(
     extra_cost = 0.0
     loop_result: LoopResult | None = None
     plan_text = resumed_plan or ""
+
+    preflight(build, on_status=on_status)
 
     # ---- stage 1: produce the plan (skipped on a resume-handoff) ----
     if resumed_plan is None:

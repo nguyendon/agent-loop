@@ -26,7 +26,18 @@ Orchestrator ── select speaker → compose prompt → agent.send → record 
 uv sync
 ```
 
-Requires the `claude` and `codex` CLIs installed and logged in.
+Requires the `claude` and `codex` CLIs installed and logged in. Each run does a
+quick **preflight** — a trivial ping to both CLIs — and aborts in seconds with the
+real error if one is misconfigured, rather than dying minutes into a debate.
+
+If a CLI rejects its default model (e.g. `codex exec` on a ChatGPT account that
+can't use `gpt-*-codex`), point agentloop at a supported one without touching the
+CLI's global config:
+
+```bash
+export AGENTLOOP_CODEX_MODEL=gpt-5.5      # scoped to agentloop's codex agents
+export AGENTLOOP_CLAUDE_MODEL=...         # optional; same for claude
+```
 
 ## Quick start
 
