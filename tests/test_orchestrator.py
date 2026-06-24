@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from agentloop import Consensus, DebatePolicy, Message, Orchestrator, RoundRobinPolicy
+from pathlib import Path
+
+from agentloop import (
+    Consensus,
+    DebatePolicy,
+    JournalStore,
+    Message,
+    Orchestrator,
+    RoundRobinPolicy,
+)
 from agentloop.agent import Agent
 from agentloop.domain import TurnResult
 
@@ -73,3 +82,40 @@ def test_policy_seed_recorded_as_user_message() -> None:
 
     # The seed comes from the policy -- the single source of truth for the task.
     assert result.transcript.messages[0] == Message("user", "task")
+
+
+def test_journal_round_trips_transcript_and_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    a, b = FakeAgent("a", ["a1"]), FakeAgent("b", ["b1"])
+    Orchestrator([a, b], DebatePolicy("the task"), max_rounds=2, store=JournalStore(path)).run()
+
+    restored = JournalStore(path).restore()
+
+    assert restored is not None
+    assert restored.transcript.messages[0] == Message("user", "the task")
+    assert [m.author for m in restored.transcript.agent_messages] == ["a", "b"]
+    # The agent's session pointer survives, so a resumed agent can pick its
+    # real CLI history back up instead of starting cold.
+    assert restored.agents["a"].session_id == "a-session"
+
+
+def test_resume_continues_without_reseeding_or_repeating(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    # First run stops at the 2-turn cap, mid-conversation.
+    a, b = FakeAgent("a", ["a1"]), FakeAgent("b", ["b1"])
+    first = Orchestrator([a, b], DebatePolicy("task"), max_rounds=2, store=JournalStore(path)).run()
+    assert first.turns == 2 and not first.resumed
+
+    # Fresh agent objects + same journal -> resume and carry on.
+    a2, b2 = FakeAgent("a", ["a2"]), FakeAgent("b", ["b2"])
+    second = Orchestrator(
+        [a2, b2], DebatePolicy("task"), max_rounds=4, store=JournalStore(path)
+    ).run()
+
+    assert second.resumed is True
+    assert second.turns == 4  # 2 restored + 2 new, not restarted from zero
+    assert [m.author for m in second.transcript.agent_messages] == ["a", "b", "a", "b"]
+    # Seed recorded exactly once across both runs.
+    assert sum(1 for m in second.transcript.messages if m.author == "user") == 1
+    # Restored agents resumed their sessions rather than treating turn 1 as fresh.
+    assert a2.turns == 2  # 1 restored + 1 taken this run
