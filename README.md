@@ -30,26 +30,22 @@ Requires the `claude` and `codex` CLIs installed and logged in.
 
 ## Use it
 
-The loop is task-agnostic. `run` hands the two agents a freeform prompt and they
-do the work with their own tools (git, file reads, `gh`, …). `review` is a thin
-preset over `run` with a reviewer prompt.
+The loop is task-agnostic. One command: hand the two agents a freeform prompt and
+they do the work with their own tools (git, file reads, `gh`, …) — describe the
+task and they inspect the repo, fetch the PR, or just reason it out.
 
 ```bash
 # Any task — the agents inspect the repo / fetch the PR / etc. themselves:
-uv run agentloop run "review the uncommitted changes and agree on the top issues"
-uv run agentloop run "review PR #42"
-uv run agentloop run "find and fix the flaky test in tests/"
+uv run agentloop "review the uncommitted changes and agree on the top issues"
+uv run agentloop "review PR #42"
+uv run agentloop "find and fix the flaky test in tests/"
 
 # Drop claude's plan-mode tools for pure-reasoning tasks (cheaper, faster):
-uv run agentloop run "Design a token-bucket rate limiter" --no-tools
-
-# Review preset (defaults to the current working changes):
-uv run agentloop review
-uv run agentloop review "the last 3 commits" --budget 1.50
+uv run agentloop "Design a token-bucket rate limiter" --no-tools
 
 # Persist a run, then resume it by reusing the same journal path:
-uv run agentloop run "review the changes" --rounds 2 --journal run.jsonl
-uv run agentloop run "review the changes" --rounds 6 --journal run.jsonl
+uv run agentloop "review the changes" --rounds 2 --journal run.jsonl
+uv run agentloop "review the changes" --rounds 6 --journal run.jsonl
 ```
 
 By default the agents have **read-only** tool access (claude in plan mode, codex
@@ -62,18 +58,17 @@ Treat `--no-tools` as a cost/speed lever, not a hard sandbox guarantee.
 ## Run it on another repo
 
 Install the CLI once, then point it anywhere — both agents run in the target
-directory, so they review whatever repo you aim them at.
+directory, so they work on whatever repo you aim them at.
 
 ```bash
 uv tool install /path/to/pr-review-agent-loop   # puts `agentloop` on your PATH
 
-cd /path/to/other/repo && agentloop review                  # cd in...
-agentloop review --repo /path/to/other/repo                 # ...or pass --repo
-agentloop run "review PR #42" --repo /path/to/other/repo
+cd /path/to/other/repo && agentloop "review the changes"   # cd in...
+agentloop "review the changes" --repo /path/to/other/repo  # ...or pass --repo
 ```
 
 Pick up later changes with `uv tool upgrade agentloop`. To run without installing:
-`uv run --project /path/to/pr-review-agent-loop agentloop review --repo /path/to/other/repo`.
+`uv run --project /path/to/pr-review-agent-loop agentloop "..." --repo /path/to/other/repo`.
 
 ## As a library
 

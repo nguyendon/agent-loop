@@ -37,7 +37,7 @@ Orchestrator ── select speaker → compose prompt → agent.send → record 
 - `src/agentloop/adapters/` — one module per CLI; parses that CLI's real output.
 - `src/agentloop/policy.py` / `stop.py` / `orchestrator.py` — the loop.
 - `src/agentloop/store.py` — resumable journal.
-- `src/agentloop/cli.py` — `run` (freeform task) and `review` (a preset over it).
+- `src/agentloop/cli.py` — `run` (a single freeform-task command).
 
 The CLI is intentionally thin: it hands the agents a prompt and lets them do the
 work with their own tools. Task-specific logic (e.g. fetching a diff) belongs in
