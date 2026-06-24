@@ -13,15 +13,30 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .agent import Agent
-from .domain import USER, Message, Transcript
+from .domain import USER, Message, Transcript, TurnResult
 from .policy import Context, Policy
 from .stop import MaxRounds, StopCondition
 from .store import RestoreState, Store
 
 log = logging.getLogger("agentloop.orchestrator")
+
+
+def fan_out(agents: Sequence[Agent], prompts: Sequence[str]) -> list[TurnResult]:
+    """Run each agent's turn concurrently and return results in agent order.
+
+    ``send()`` is blocking subprocess I/O, so the GIL is released while each CLI
+    runs -- a thread pool gives real wall-clock parallelism here. Exceptions
+    propagate from ``.result()``.
+    """
+    with ThreadPoolExecutor(max_workers=max(1, len(agents))) as pool:
+        futures = [
+            pool.submit(agent.send, prompt) for agent, prompt in zip(agents, prompts, strict=True)
+        ]
+        return [future.result() for future in futures]
 
 
 @dataclass(slots=True)
@@ -42,6 +57,7 @@ class Orchestrator:
         max_rounds: int = 12,
         on_message: Callable[[Message], None] | None = None,
         on_turn_start: Callable[[Agent, int], None] | None = None,
+        on_parallel_start: Callable[[Sequence[Agent]], None] | None = None,
         store: Store | None = None,
     ) -> None:
         if not agents:
@@ -57,6 +73,8 @@ class Orchestrator:
         # Fired right before an agent's (blocking) turn -- lets a UI show that
         # work is happening during the long silent wait for the subprocess.
         self.on_turn_start = on_turn_start
+        # Fired before the parallel opening round (all agents at once).
+        self.on_parallel_start = on_parallel_start
         self.store = store
 
     def run(self) -> LoopResult:
@@ -69,6 +87,20 @@ class Orchestrator:
             " vs ".join(a.name for a in self.agents),
             self.stop[-1].n if isinstance(self.stop[-1], MaxRounds) else turn,
         )
+        # Parallel opening: on a fresh run, if the policy says every agent's first
+        # turn is independent, run them all at once -- nobody waits on the other
+        # for context, and the serial debate begins as soon as both are ready.
+        if turn == 0:
+            openings = self.policy.parallel_opening(Context(transcript, self.agents, 0))
+            if openings is not None:
+                log.info("parallel opening: %s", ", ".join(a.name for a in self.agents))
+                if self.on_parallel_start is not None:
+                    self.on_parallel_start(self.agents)
+                results = fan_out(self.agents, openings)
+                for agent, result in zip(self.agents, results, strict=True):
+                    self._record(agent, result, transcript)
+                turn = len(transcript.agent_messages)
+
         stopped_by = "no_speaker"
         while True:
             ctx = Context(transcript, self.agents, turn)
@@ -89,31 +121,34 @@ class Orchestrator:
             log.info("turn %d → %s", turn + 1, speaker.name)
             if self.on_turn_start is not None:
                 self.on_turn_start(speaker, turn)
-            result = speaker.send(prompt)
-            message = transcript.add(
-                Message(
-                    author=speaker.name,
-                    content=result.text,
-                    usage=result.usage,
-                    cost_usd=result.cost_usd,
-                )
-            )
-            if self.store is not None:
-                self.store.record_turn(
-                    name=speaker.name,
-                    session_id=speaker.session_id,
-                    turns=speaker.turns,
-                    message=message,
-                )
-            if self.on_message is not None:
-                self.on_message(message)
-
+            self._record(speaker, speaker.send(prompt), transcript)
             turn += 1
 
         log.info(
             "stopped by %s after %d turns ($%.4f)", stopped_by, turn, transcript.total_cost_usd
         )
         return LoopResult(transcript=transcript, turns=turn, stopped_by=stopped_by, resumed=resumed)
+
+    def _record(self, speaker: Agent, result: TurnResult, transcript: Transcript) -> None:
+        """Append a turn to the transcript, journal it, and notify -- shared by
+        the parallel opening and the serial loop."""
+        message = transcript.add(
+            Message(
+                author=speaker.name,
+                content=result.text,
+                usage=result.usage,
+                cost_usd=result.cost_usd,
+            )
+        )
+        if self.store is not None:
+            self.store.record_turn(
+                name=speaker.name,
+                session_id=speaker.session_id,
+                turns=speaker.turns,
+                message=message,
+            )
+        if self.on_message is not None:
+            self.on_message(message)
 
     # --- startup: fresh seed or restore from the journal ---------------------
 

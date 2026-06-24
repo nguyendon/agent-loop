@@ -11,6 +11,7 @@ from agentloop import (
     Message,
     Orchestrator,
     RoundRobinPolicy,
+    fan_out,
 )
 from agentloop.agent import Agent
 from agentloop.domain import TurnResult
@@ -49,6 +50,32 @@ def test_round_robin_alternates_and_seeds_task() -> None:
     # Each agent's opening prompt is the raw task; later prompts quote the other.
     assert a.prompts[0] == "do the thing"
     assert "b said:" in a.prompts[1]
+
+
+def test_debate_opens_in_parallel_then_goes_serial() -> None:
+    a = FakeAgent("a", ["a-open", "a-rebut"])
+    b = FakeAgent("b", ["b-open", "b-rebut"])
+    loop = Orchestrator([a, b], DebatePolicy("the task"), max_rounds=4)
+
+    result = loop.run()
+
+    authors = [m.author for m in result.transcript.agent_messages]
+    assert authors == ["a", "b", "a", "b"]
+    # Both openings are independent: each agent's first prompt is the same task
+    # framing and neither quotes the other.
+    assert a.prompts[0] == b.prompts[0]
+    assert "b-open" not in a.prompts[0]
+    # The serial rebuttal that follows does quote the other's opening.
+    assert "b-open" in a.prompts[1]
+
+
+def test_fan_out_preserves_agent_order() -> None:
+    agents = [FakeAgent("a", ["ra"]), FakeAgent("b", ["rb"]), FakeAgent("c", ["rc"])]
+    results = fan_out(agents, ["pa", "pb", "pc"])
+
+    assert [r.text for r in results] == ["ra", "rb", "rc"]
+    # Each agent received its matching prompt.
+    assert [agent.prompts[0] for agent in agents] == ["pa", "pb", "pc"]
 
 
 def test_consensus_stops_when_all_agents_agree() -> None:

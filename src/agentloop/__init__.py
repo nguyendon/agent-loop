@@ -6,7 +6,7 @@ from .adapters.claude import ClaudeAgent
 from .adapters.codex import CodexAgent
 from .agent import Agent, AgentError, CliAgent
 from .domain import Message, Transcript, TurnResult
-from .orchestrator import LoopResult, Orchestrator
+from .orchestrator import LoopResult, Orchestrator, fan_out
 from .policy import Context, DebatePolicy, Policy, RoundRobinPolicy
 from .stop import BudgetUSD, Consensus, MaxRounds, StopCondition
 from .store import JournalStore, Store
@@ -32,4 +32,5 @@ __all__ = [
     "Store",
     "Transcript",
     "TurnResult",
+    "fan_out",
 ]

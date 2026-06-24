@@ -12,6 +12,7 @@ so Typer promotes it -- invoke it as `agentloop "<task>"`, no subcommand.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
@@ -108,6 +109,13 @@ def _run_loop(
             )
             spinner.start()
 
+    def _on_parallel_start(agents: Sequence[Agent]) -> None:
+        nonlocal spinner
+        if spinner_on:
+            names = ", ".join(a.name for a in agents)
+            spinner = console.status(f"[bold]{names}[/bold] thinking in parallel…", spinner="dots")
+            spinner.start()
+
     def _on_message(message: Message) -> None:
         _stop_spinner()
         _print_message(message)
@@ -124,6 +132,7 @@ def _run_loop(
         max_rounds=rounds,
         on_message=_on_message,
         on_turn_start=_on_turn_start,
+        on_parallel_start=_on_parallel_start,
         store=store,
     )
     try:

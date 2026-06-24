@@ -39,6 +39,12 @@ class Policy(ABC):
         orchestrator records it but never owns a second copy."""
         return None
 
+    def parallel_opening(self, ctx: Context) -> list[str] | None:
+        """If every agent's first turn is independent of the others, return one
+        opening prompt per agent (in ``ctx.agents`` order) so the orchestrator can
+        run them concurrently. Return ``None`` to keep the loop fully serial."""
+        return None
+
 
 class RoundRobinPolicy(Policy):
     """Cycle through agents in order. First time each agent speaks it gets the
@@ -89,10 +95,18 @@ class DebatePolicy(Policy):
             raise ValueError("DebatePolicy requires exactly two agents")
         return ctx.agents[ctx.turn % 2]
 
+    def _opening(self) -> str:
+        return f"{self.opening_instructions}\n\n--- TASK ---\n{self.task}"
+
+    def parallel_opening(self, ctx: Context) -> list[str] | None:
+        # Each agent's opening depends only on the task, never on the others, so
+        # the whole first round can run at once instead of A-waits-for-B.
+        return [self._opening() for _ in ctx.agents]
+
     def compose(self, speaker: Agent, ctx: Context) -> str:
         last = ctx.transcript.last_from_others(speaker.name)
         if _is_first_turn(speaker) or last is None or last.author == "user":
-            return f"{self.opening_instructions}\n\n--- TASK ---\n{self.task}"
+            return self._opening()
         return (
             f"{self.rebuttal_instructions}\n\n"
             f"--- {last.author}'s latest response ---\n{last.content}"
