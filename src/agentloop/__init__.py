@@ -9,7 +9,7 @@ from .domain import Message, Transcript, TurnResult
 from .orchestrator import LoopResult, Orchestrator, fan_out
 from .policy import Context, DebatePolicy, Policy, RoundRobinPolicy
 from .stop import BudgetUSD, Consensus, MaxRounds, StopCondition
-from .store import JournalStore, Store
+from .store import FixJournal, JournalStore, Store
 
 __all__ = [
     "Agent",
@@ -21,6 +21,7 @@ __all__ = [
     "Consensus",
     "Context",
     "DebatePolicy",
+    "FixJournal",
     "JournalStore",
     "LoopResult",
     "MaxRounds",

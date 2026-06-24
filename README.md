@@ -173,13 +173,16 @@ Agents **don't share memory** — they never read each other's Layer-3 history.
 Information crosses between them only as text: one agent's turn is recorded in
 the transcript, and `Policy.compose()` quotes it into the next agent's prompt.
 
-Every run is **durable and resumable**. The CLI journals automatically to
-`out/<run>/journal.jsonl`; the library takes a `JournalStore` explicitly. Every
-turn is appended as it happens, so a crash loses at most the in-flight turn.
-Replaying the journal (`--resume out/<run>`, or reusing the same path in code)
-rebuilds the transcript *and* restores each agent's `session_id`, so the CLIs
-reload their real Layer-3 context and the loop continues exactly where it
-stopped — not from a cold start.
+Every run is **durable and resumable**. Stage 1 (triage/discovery/debate)
+journals to `journal.jsonl`; when the write gate is crossed, stage 2
+(implement/review) journals to the sibling `fix.journal.jsonl`. The CLI creates
+both automatically under `out/<run>/`; library callers get the same default by
+passing a `JournalStore` to `solve()`, or can wire the journals explicitly.
+Every turn is appended as it happens, so a crash loses at most the in-flight
+turn. Replaying the run (`--resume out/<run>`, or reusing the same journal path
+in code) rebuilds the transcript *and* restores each agent's `session_id`, so
+the CLIs reload their real Layer-3 context and the loop continues exactly where
+it stopped — not from a cold start.
 
 ```python
 from agentloop import JournalStore, Orchestrator

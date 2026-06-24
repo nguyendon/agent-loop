@@ -9,7 +9,8 @@ Layout per run::
     out/<timestamp>-<slug>/         (gitignored, created by the CLI up front)
       report.md          plan + implementation verdict + run metadata
       plan.md            the agreed plan -- the handoff artifact for --resume --write
-      journal.jsonl      resume journal (written by the store)
+      journal.jsonl      stage-1 resume journal (triage/discovery/debate)
+      fix.journal.jsonl  stage-2 resume journal (implement/review; only with --write)
       transcript/
         debate.md        stage-1 debate (omitted on a resume-handoff)
         fix.md           stage-2 implement + review (only when --write ran)

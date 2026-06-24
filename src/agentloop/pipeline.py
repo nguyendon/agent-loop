@@ -30,7 +30,7 @@ from .domain import Message, Transcript
 from .orchestrator import LoopResult, Orchestrator, fan_out
 from .policy import DebatePolicy
 from .stop import Consensus, StopCondition
-from .store import Store
+from .store import FixJournal, FixRestoreState, JournalStore, RestoreState, Store
 
 log = logging.getLogger("agentloop.pipeline")
 
@@ -208,6 +208,38 @@ def _noop(*_: object) -> None:
     pass
 
 
+class _ReviewStore:
+    """Adapter that journals a single fix attempt's reviewer debate."""
+
+    def __init__(self, journal: FixJournal, attempt: int, restored: FixRestoreState | None) -> None:
+        self.journal = journal
+        self.attempt = attempt
+        self.restored = restored
+
+    def record_seed(self, message: Message) -> None:
+        # The review task is reconstructed from the implementer report + plan.
+        del message
+
+    def record_turn(
+        self, *, name: str, session_id: str | None, turns: int, message: Message
+    ) -> None:
+        self.journal.record_review_turn(
+            attempt=self.attempt,
+            name=name,
+            session_id=session_id,
+            turns=turns,
+            message=message,
+        )
+
+    def restore(self) -> RestoreState | None:
+        if self.restored is None:
+            return None
+        return RestoreState(
+            transcript=self.restored.review_transcript,
+            agents=self.restored.reviewer_agents,
+        )
+
+
 _PREFLIGHT_PROMPT = "Reply with the single word: ok"
 _MODEL_HINT = (
     "\nIf an agent rejects its model, set AGENTLOOP_CODEX_MODEL / "
@@ -238,6 +270,7 @@ def fix(
     plan_text: str,
     *,
     build: Build,
+    store: FixJournal | None = None,
     max_attempts: int = _MAX_FIX_ATTEMPTS,
     review_rounds: int = _REVIEW_ROUNDS,
     on_message: Callable[[Message], None] = _noop,
@@ -246,27 +279,53 @@ def fix(
 ) -> FixResult:
     """Implement the plan with a single write agent, then review the diff; loop
     until the reviewers converge on APPROVED or ``max_attempts`` is hit."""
-    transcript = Transcript()
+    restored = store.restore() if store is not None else None
+    if restored is not None and restored.completed:
+        return FixResult(
+            transcript=restored.transcript,
+            approved=restored.approved,
+            attempts=restored.attempt,
+            cost_usd=restored.transcript.total_cost_usd,
+        )
+
+    transcript = restored.transcript if restored is not None else Transcript()
     approved = False
-    cost = 0.0
-    feedback = ""
-    attempt = 0
+    feedback = restored.feedback if restored is not None else ""
+    attempt = restored.attempt if restored is not None else 0
 
     while attempt < max_attempts:
-        attempt += 1
-        implementer = build.implementer()
-        on_turn_start(implementer, 0)
-        result = implementer.send(_implement_prompt(task, plan_text, feedback))
-        cost += result.cost_usd or 0.0
-        change = transcript.add(Message(implementer.name, result.text, cost_usd=result.cost_usd))
-        on_message(change)
+        active_review = (
+            restored is not None and restored.implement_message is not None and not feedback
+        )
+        if active_review:
+            change = restored.implement_message
+            review_store = _ReviewStore(store, attempt, restored) if store is not None else None
+            prior_review_turns = len(restored.review_transcript.agent_messages)
+        else:
+            attempt += 1
+            implementer = build.implementer()
+            on_turn_start(implementer, 0)
+            result = implementer.send(_implement_prompt(task, plan_text, feedback))
+            change = transcript.add(
+                Message(implementer.name, result.text, usage=result.usage, cost_usd=result.cost_usd)
+            )
+            if store is not None:
+                store.record_implement(
+                    attempt=attempt,
+                    session_id=implementer.session_id,
+                    turns=implementer.turns,
+                    message=change,
+                )
+            on_message(change)
+            review_store = _ReviewStore(store, attempt, None) if store is not None else None
+            prior_review_turns = 0
 
         # A fresh read-only debate over the actual diff; consensus on APPROVED ends it.
         reviewers = [build.claude("reviewer-claude"), build.codex("reviewer-codex")]
         review = Orchestrator(
             reviewers,
             DebatePolicy(
-                _review_seed(task, plan_text, result.text),
+                _review_seed(task, plan_text, change.content),
                 opening_instructions=_REVIEW_OPENING,
                 rebuttal_instructions=_REVIEW_REBUTTAL,
             ),
@@ -275,18 +334,30 @@ def fix(
             on_message=on_message,
             on_turn_start=on_turn_start,
             on_parallel_start=on_parallel_start,
+            store=review_store,
         ).run()
-        for message in review.transcript.agent_messages:
+        for message in review.transcript.agent_messages[prior_review_turns:]:
             transcript.add(message)
-        cost += review.transcript.total_cost_usd
 
         if review.stopped_by == "Consensus":
             approved = True
+            if store is not None:
+                store.record_outcome(attempt=attempt, approved=True)
             break
         feedback = _requested_changes(review.transcript)
+        if store is not None:
+            store.record_feedback(attempt=attempt, feedback=feedback)
         log.info("fix attempt %d not approved; looping with reviewer feedback", attempt)
+        restored = None
 
-    return FixResult(transcript=transcript, approved=approved, attempts=attempt, cost_usd=cost)
+    if store is not None and not approved:
+        store.record_outcome(attempt=attempt, approved=False)
+    return FixResult(
+        transcript=transcript,
+        approved=approved,
+        attempts=attempt,
+        cost_usd=transcript.total_cost_usd,
+    )
 
 
 def solve(
@@ -300,6 +371,7 @@ def solve(
     write: bool = False,
     resumed_plan: str | None = None,
     store: Store | None = None,
+    fix_store: FixJournal | None = None,
     on_status: Callable[[str], None] = _noop,
     on_message: Callable[[Message], None] = _noop,
     on_turn_start: Callable[[Agent, int], None] = _noop,
@@ -309,6 +381,9 @@ def solve(
     extra_cost = 0.0
     loop_result: LoopResult | None = None
     plan_text = resumed_plan or ""
+    effective_fix_store = fix_store or (
+        store.fix_journal() if isinstance(store, JournalStore) else None
+    )
 
     preflight(build, on_status=on_status)
 
@@ -371,6 +446,7 @@ def solve(
             task,
             plan_text,
             build=build,
+            store=effective_fix_store,
             on_message=on_message,
             on_turn_start=on_turn_start,
             on_parallel_start=on_parallel_start,

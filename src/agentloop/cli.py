@@ -32,7 +32,7 @@ from .domain import Message
 from .pipeline import Build, solve
 from .report import slug, write_run_report
 from .stop import BudgetUSD, Consensus, StopCondition
-from .store import JournalStore
+from .store import FixJournal, JournalStore
 
 app = typer.Typer(add_completion=False, help="Run a multi-agent loop over the claude & codex CLIs.")
 console = Console()
@@ -123,6 +123,7 @@ def _run_loop(
         _write_meta(run_dir, task, when)
 
     store = JournalStore(run_dir / "journal.jsonl")
+    fix_store = FixJournal(run_dir / "fix.journal.jsonl")
     stop: list[StopCondition] = [Consensus("AGREED"), BudgetUSD(_BUDGET_USD)]
     scouts: list[Message] = []
 
@@ -180,6 +181,7 @@ def _run_loop(
             write=write,
             resumed_plan=resumed_plan,
             store=store,
+            fix_store=fix_store,
             on_status=_on_status,
             on_message=_on_message,
             on_turn_start=_on_turn_start,

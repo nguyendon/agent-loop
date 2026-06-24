@@ -10,8 +10,9 @@ from __future__ import annotations
 import pytest
 
 from agentloop.agent import Agent, AgentError
-from agentloop.domain import TurnResult
+from agentloop.domain import Message, TurnResult
 from agentloop.pipeline import Build, fix, preflight, solve
+from agentloop.store import FixJournal, JournalStore
 
 _TRIAGE_NO_DISCOVERY = '{"discovery": false, "focuses": [], "reason": "simple"}'
 _PLAN = "Plan: correct the off-by-one in foo.py and re-run the suite to confirm."
@@ -147,9 +148,74 @@ def test_preflight_fails_fast_with_real_error_and_hint() -> None:
     assert "AGENTLOOP_CODEX_MODEL" in message  # and how to fix it
 
 
+class _ResumeReviewBuild(Build):
+    def __init__(self) -> None:
+        super().__init__(repo=None)
+        self.created: list[str] = []
+
+    def claude(self, name: str = "claude", system_prompt: str | None = None) -> Agent:
+        self.created.append(name)
+        return _Fake(name, ["APPROVED, correct and complete"])
+
+    def codex(self, name: str = "codex", system_prompt: str | None = None) -> Agent:
+        self.created.append(name)
+        return _Fake(name, ["APPROVED, correct and complete"])
+
+    def implementer(self, name: str = "implementer") -> Agent:
+        raise AssertionError("resume should continue the in-flight review, not re-run implementer")
+
+
 def test_build_reads_model_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENTLOOP_CODEX_MODEL", "gpt-5.5")
     monkeypatch.setenv("AGENTLOOP_CLAUDE_MODEL", "claude-haiku-4-5")
     build = Build()
     assert build.codex_model == "gpt-5.5"
     assert build.claude_model == "claude-haiku-4-5"
+
+
+def test_fix_resumes_in_flight_review_without_restarting_attempt(tmp_path) -> None:
+    journal = FixJournal(tmp_path / "fix.journal.jsonl")
+    journal.record_implement(
+        attempt=1,
+        session_id="implementer-session",
+        turns=1,
+        message=_message("implementer", "implemented attempt 1", 0.01),
+    )
+    journal.record_review_turn(
+        attempt=1,
+        name="reviewer-claude",
+        session_id="reviewer-claude-session",
+        turns=1,
+        message=_message("reviewer-claude", "APPROVED, looks correct", 0.01),
+    )
+
+    build = _ResumeReviewBuild()
+    result = fix("fix it", _PLAN, build=build, store=journal, max_attempts=3, review_rounds=2)
+
+    assert result.approved
+    assert result.attempts == 1
+    assert build.created == ["reviewer-claude", "reviewer-codex"]
+    assert [m.author for m in result.transcript.messages] == [
+        "implementer",
+        "reviewer-claude",
+        "reviewer-codex",
+    ]
+
+
+def test_solve_derives_fix_journal_from_main_store_by_default(tmp_path) -> None:
+    build = FakeBuild(approve_on_attempt=1)
+    store = JournalStore(tmp_path / "journal.jsonl")
+
+    result = solve("fix it", build=build, rounds=8, stop=[], write=True, store=store)
+
+    restored = store.fix_journal().restore()
+    assert result.fix is not None and result.fix.approved
+    assert restored is not None
+    assert restored.completed
+    assert restored.approved
+    assert restored.attempt == 1
+    assert restored.implement_message is not None
+
+
+def _message(author: str, content: str, cost_usd: float):
+    return Message(author, content, cost_usd=cost_usd)
